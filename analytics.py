@@ -210,18 +210,22 @@ def classify_point(
     acceleration: float,
     cos_inversion: float,
     near_net: bool,
+    on_net_line: bool,
     impact_in: bool,
     duration_s: float,
     contact_players: bool,
 ) -> str:
+    direction_flip = cos_inversion <= config.spike_dir_change_cos
     if duration_s <= config.ace_max_duration_s and impact_in and not contact_players:
         return "ACE"
-    if near_net and cos_inversion <= config.block_speed_inversion_ratio:
+    if direction_flip and on_net_line:
         return "POINT_BY_BLOCK"
-    if max_speed_px >= config.spike_speed_thresh and acceleration > config.spike_speed_thresh and near_net:
+    if direction_flip and near_net:
         return "POINT_BY_SPIKE"
     if not impact_in:
         return "OPPONENT_ERROR"
+    if max_speed_px >= config.spike_speed_thresh and acceleration > config.spike_speed_thresh and near_net:
+        return "POINT_BY_SPIKE"
     return "UNKNOWN"
 
 
@@ -320,12 +324,16 @@ class AnalyticsEngine:
                     dy = recent_points[i + 1][1] - recent_points[i][1]
                     max_speed_recent = max(max_speed_recent, float(np.hypot(dx, dy)))
             cos_inv_recent = tracker.horizontal_inversion()
+            near_net = tracker.ball_near_net(ball_state.pixel)
+            on_net_line = tracker.ball_on_net_line(ball_state.pixel) or tracker.crossed_net_line()
+            accel = tracker.acceleration()
 
             ptype = classify_point(
                 max_speed_px=max_speed_recent,
-                acceleration=tracker.acceleration(),
+                acceleration=accel,
                 cos_inversion=cos_inv_recent,
-                near_net=tracker.ball_near_net(ball_state.pixel),
+                near_net=near_net,
+                on_net_line=on_net_line,
                 impact_in=impact_in,
                 duration_s=duration,
                 contact_players=contact_players,

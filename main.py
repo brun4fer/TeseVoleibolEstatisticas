@@ -27,7 +27,8 @@ def draw_players(frame, players):
         )
 
 
-def draw_ball_trail(frame, trail):
+def draw_ball_trail(frame, trail, max_points: int = 10):
+    trail = trail[-max_points:]
     for i in range(1, len(trail)):
         cv2.line(frame, trail[i - 1], trail[i], (0, 255, 0), 2)
     if trail:
@@ -77,7 +78,7 @@ def main():
 
         if not config.HEADLESS_MODE:
             draw_players(frame, detections["players"])
-            draw_ball_trail(frame, tracker.trail_points())
+            draw_ball_trail(frame, tracker.trail_points(), max_points=10)
             draw_sidebar(frame, analytics.rally_mgr, analytics.counts, analytics.rally_counter)
 
             # ROI do marcador em verde

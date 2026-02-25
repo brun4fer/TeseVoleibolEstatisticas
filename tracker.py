@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Deque, Dict, List, Optional, Tuple
 
 import cv2
@@ -67,7 +68,10 @@ class BallKalman:
 class VolleyballTracker:
     def __init__(self, H: np.ndarray, net_line: Tuple[Tuple[int, int], Tuple[int, int]]):
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        self.model = YOLO(config.yolo_model)
+        model_path = Path("best.pt")
+        if not model_path.exists():
+            model_path = Path(config.yolo_model)
+        self.model = YOLO(str(model_path))
         try:
             self.model.to(self.device)
         except Exception:
@@ -79,6 +83,9 @@ class VolleyballTracker:
         self.trail: Deque[Tuple[int, int]] = deque(maxlen=config.max_trail)
         self.last_ball_detected = False
         self.frames_since_ball = 0
+        self.ball_id = 1
+        self.ball_missing = 0
+        self.ball_last_det: Optional[Dict] = None
 
     def detect(self, frame) -> Dict:
         """
@@ -88,8 +95,11 @@ class VolleyballTracker:
             source=frame,
             stream=False,
             persist=True,
-            conf=0.15,  # valor baixo para garantir bola; filtramos por classe abaixo
+            conf=0.15,  # mais permissivo com modelo especializado
             iou=config.iou_thresh,
+            imgsz=1280,
+            vid_stride=1,
+            classes=[CLASS_PERSON, CLASS_SPORTS_BALL],
             device=self.device,
             verbose=False,
         )
@@ -99,6 +109,7 @@ class VolleyballTracker:
 
         players = []
         ball_det = None
+        ball_candidates = []
         for box in res.boxes:
             cls = int(box.cls)
             x1, y1, x2, y2 = box.xyxy[0].tolist()
@@ -107,39 +118,74 @@ class VolleyballTracker:
                 tid = int(box.id.item()) if box.id is not None else -1
                 players.append({"id": tid, "bbox": (x1, y1, x2, y2), "conf": float(box.conf)})
             elif cls == CLASS_SPORTS_BALL and float(box.conf) >= 0.15:
-                ball_det = {"bbox": (x1, y1, x2, y2), "center": (cx, cy), "conf": float(box.conf)}
+                area = (x2 - x1) * (y2 - y1)
+                if area > config.ball_max_area_px:
+                    continue
+                court_pt = pixel_to_court(self.H, (cx, cy))
+                if not self._court_contains(court_pt):
+                    continue
+                det = {"bbox": (x1, y1, x2, y2), "center": (cx, cy), "conf": float(box.conf), "area": area}
+                ball_candidates.append(det)
+
+        if ball_candidates:
+            ball_det = max(ball_candidates, key=lambda b: b["conf"])
+            ball_det["id"] = self.ball_id  # prioridade para classe bola
+            self.ball_missing = 0
+            self.ball_last_det = ball_det
+        else:
+            self.ball_missing += 1
+            if self.ball_missing <= config.ball_max_age_frames and self.ball_last_det is not None:
+                # mantém ID e última bbox/center por tolerância
+                ball_det = self.ball_last_det
+            else:
+                self.ball_last_det = None
 
         return {"players": players, "ball_det": ball_det}
+
+
 
     def update_ball(self, ball_det: Optional[Dict]) -> BallState:
         meas = ball_det["center"] if ball_det is not None else None
 
-        # Previsão manual curta se desaparecer <=10 frames usando último vetor
-        if meas is None and 0 < self.frames_since_ball <= 10 and len(self.trail) >= 2:
-            (x1, y1), (x2, y2) = self.trail[-2], self.trail[-1]
-            vx, vy = x2 - x1, y2 - y1
-            x_pred, y_pred = x2 + vx, y2 + vy
-            x, y = x_pred, y_pred
-        else:
+        if meas is not None:
             x, y = self.ball_kf.update(meas)
-
-        if ball_det is None:
-            self.frames_since_ball += 1
-            self.last_ball_detected = False
-        else:
             self.frames_since_ball = 0
             self.last_ball_detected = True
+        else:
+            if self.ball_kf.initialized:
+                kx, ky = self.ball_kf.update(None)
+            else:
+                kx, ky = (self.trail[-1] if self.trail else (0.0, 0.0))
+            v_avg = self._avg_velocity()
+            if v_avg is not None and self.trail:
+                x = self.trail[-1][0] + v_avg[0]
+                y = self.trail[-1][1] + v_avg[1]
+                x = 0.5 * x + 0.5 * kx
+                y = 0.5 * y + 0.5 * ky
+            else:
+                x, y = kx, ky
+            self.frames_since_ball += 1
+            self.last_ball_detected = False
 
         self.trail.append((int(x), int(y)))
         speed_px = self._instant_speed()
         court_xy = pixel_to_court(self.H, (x, y))
         return BallState(pixel=(x, y), court=court_xy, speed_px=speed_px)
 
+
     def _instant_speed(self) -> float:
         if len(self.trail) < 2:
             return 0.0
         (x1, y1), (x2, y2) = self.trail[-2], self.trail[-1]
         return float(np.hypot(x2 - x1, y2 - y1))
+
+    def _avg_velocity(self) -> Optional[Tuple[float, float]]:
+        if len(self.trail) < 3:
+            return None
+        v1 = np.array(self.trail[-1]) - np.array(self.trail[-2])
+        v2 = np.array(self.trail[-2]) - np.array(self.trail[-3])
+        v_mean = (v1 + v2) / 2.0
+        return float(v_mean[0]), float(v_mean[1])
 
     def acceleration(self) -> float:
         if len(self.trail) < 3:
@@ -159,13 +205,46 @@ class VolleyballTracker:
             return 1.0
         return float(np.dot(v1, v2) / norm)
 
-    def trail_points(self) -> List[Tuple[int, int]]:
-        return list(self.trail)
+    def trail_points(self, last_n: Optional[int] = None) -> List[Tuple[int, int]]:
+        pts = list(self.trail)
+        if last_n is not None:
+            return pts[-last_n:]
+        return pts
+
+    def _court_contains(self, court_pt: Tuple[float, float]) -> bool:
+        margin = config.court_margin_m
+        x, y = court_pt
+        return -margin <= x <= 9 + margin and -margin <= y <= 18 + margin
+
+    def _dist_to_net_line(self, pixel_pt: Tuple[float, float]) -> float:
+        (x1, y1), (x2, y2) = self.net_line
+        dx, dy = x2 - x1, y2 - y1
+        denom = dx * dx + dy * dy
+        if denom == 0:
+            return 1e9
+        t = ((pixel_pt[0] - x1) * dx + (pixel_pt[1] - y1) * dy) / denom
+        t = max(0.0, min(1.0, t))
+        proj_x = x1 + t * dx
+        proj_y = y1 + t * dy
+        return float(np.hypot(pixel_pt[0] - proj_x, pixel_pt[1] - proj_y))
 
     def ball_near_net(self, pixel_pt: Tuple[float, float]) -> bool:
+        return self._dist_to_net_line(pixel_pt) <= config.net_band_height_px
+
+    def ball_on_net_line(self, pixel_pt: Tuple[float, float]) -> bool:
+        return self._dist_to_net_line(pixel_pt) <= config.net_line_tolerance_px
+
+    def crossed_net_line(self) -> bool:
+        """Verifica se os dois Ãºltimos pontos do rasto estÃ£o em lados opostos da rede."""
+        if len(self.trail) < 2:
+            return False
         (x1, y1), (x2, y2) = self.net_line
-        net_y = (y1 + y2) / 2
-        return abs(pixel_pt[1] - net_y) <= config.net_band_height_px
+        a = y1 - y2
+        b = x2 - x1
+        c = x1 * y2 - x2 * y1
+        side_prev = a * self.trail[-2][0] + b * self.trail[-2][1] + c
+        side_cur = a * self.trail[-1][0] + b * self.trail[-1][1] + c
+        return side_prev * side_cur < 0
 
     def predict_impact_point(self) -> Optional[Tuple[int, int]]:
         """

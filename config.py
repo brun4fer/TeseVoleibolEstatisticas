@@ -33,8 +33,13 @@ class Config:
     max_trail: int = 60
     spike_speed_thresh: float = 14.0  # pixels / frame
     block_speed_inversion_ratio: float = -0.6
+    spike_dir_change_cos: float = -0.35  # inversao de direcao para spike
     ace_max_duration_s: float = 3.0
     net_band_height_px: int = 25  # tolerance when checking ball near net
+    net_line_tolerance_px: int = 10  # distancia max ao segmento da rede para block
+    ball_max_area_px: int = 2200  # area maxima aceitavel da bbox da bola
+    ball_max_age_frames: int = 30  # manter ID da bola se desaparecer (frames)
+    court_margin_m: float = 0.35  # tolerancia na conversao pixel->campo
 
     # Scoreboard ROI (x, y, w, h) in pixels relative to full frame
     score_roi: Tuple[int, int, int, int] = (25, 45, 340, 150)
