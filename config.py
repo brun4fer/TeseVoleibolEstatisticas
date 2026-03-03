@@ -18,7 +18,7 @@ class Config:
     calibration_dir: Path = Path("calibration")
 
     # Time window (absolute timestamps in the video)
-    start_ts: str = "00:26:02"
+    start_ts: str = "00:29:02"
     end_ts: str = "00:46:17"
 
     # Models
@@ -36,7 +36,16 @@ class Config:
     spike_dir_change_cos: float = -0.35  # inversao de direcao para spike
     ace_max_duration_s: float = 3.0
     net_band_height_px: int = 25  # tolerance when checking ball near net
-    net_line_tolerance_px: int = 10  # distancia max ao segmento da rede para block
+    net_line_tolerance_px: int = 80  # distancia max ao segmento da rede para block
+    zone_block_half_width_px: int = 100  # margem horizontal da caixa de impacto da rede (+40px de antecipacao)
+    zone_block_below_px: int = 20  # ZONE_BLOCK começa 20px abaixo da fita da rede
+    zone_block_above_px: int = 100  # ZONE_BLOCK estende 100px acima da fita da rede
+    block_height_margin_m: float = 0.50  # faixa acima do topo da rede para validar block
+    block_player_proximity_px: int = 110  # distancia max jogador defensor <-> impacto na rede
+    block_min_vx_px: float = 1.5  # velocidade horizontal minima para validar inversao
+    block_occlusion_max_frames: int = 12  # frames maximos para fechar evento por oclusao
+    block_event_ttl_s: float = 3.0  # tempo maximo para associar evento da rede ao ponto OCR
+    block_event_cooldown_frames: int = 6  # evita duplicar bloco em frames consecutivos
     ball_max_area_px: int = 2200  # area maxima aceitavel da bbox da bola
     ball_max_age_frames: int = 30  # manter ID da bola se desaparecer (frames)
     court_margin_m: float = 0.35  # tolerancia na conversao pixel->campo

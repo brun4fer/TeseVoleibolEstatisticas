@@ -5,6 +5,7 @@ Loop principal do sistema de análise de voleibol.
 """
 
 import cv2
+import numpy as np
 
 from analytics import AnalyticsEngine, draw_sidebar
 from calibration import run_calibration
@@ -27,12 +28,30 @@ def draw_players(frame, players):
         )
 
 
-def draw_ball_trail(frame, trail, max_points: int = 10):
+def draw_ball_trail(frame, trail, max_points: int = 10, color=(0, 255, 0)):
     trail = trail[-max_points:]
-    for i in range(1, len(trail)):
-        cv2.line(frame, trail[i - 1], trail[i], (0, 255, 0), 2)
-    if trail:
-        cv2.circle(frame, trail[-1], 6, (0, 0, 255), -1)
+    if len(trail) < 2:
+        if trail:
+            cv2.circle(frame, trail[-1], 6, (0, 0, 255), -1)
+        return
+
+    # Smooth polyline with a short moving average window.
+    smoothed = []
+    win = 5
+    for i in range(len(trail)):
+        a = max(0, i - win + 1)
+        chunk = trail[a : i + 1]
+        sx = int(sum(p[0] for p in chunk) / len(chunk))
+        sy = int(sum(p[1] for p in chunk) / len(chunk))
+        smoothed.append((sx, sy))
+
+    pts = np.array(smoothed, dtype=np.int32).reshape(-1, 1, 2)
+    cv2.polylines(frame, [pts], isClosed=False, color=color, thickness=2)
+    cv2.circle(frame, tuple(smoothed[-1]), 6, (0, 0, 255), -1)
+    if len(smoothed) >= 2:
+        p0 = smoothed[-2]
+        p1 = smoothed[-1]
+        cv2.arrowedLine(frame, p0, p1, color, 2, tipLength=0.35)
 
 
 def main():
@@ -54,6 +73,7 @@ def main():
 
     frame_idx = start_f
     skip_rate = 2  # processar 1 em cada 2 frames
+    trail_color = (0, 255, 0)
     while True:
         ok, frame = cap.read()
         if not ok or frame_idx > end_f:
@@ -65,20 +85,29 @@ def main():
             continue
 
         detections = tracker.detect(frame)
-        ball_state = tracker.update_ball(detections["ball_det"])
+        ts = frame_idx / fps
+        ball_state = tracker.update_ball(detections["ball_det"], timestamp_s=ts)
 
         rally_finished, ptype = analytics.process_frame(
             frame=frame,
             frame_idx=frame_idx,
-            timestamp_s=frame_idx / fps,
+            timestamp_s=ts,
             ball_state=ball_state,
             players=detections["players"],
             tracker=tracker,
         )
 
+        if rally_finished:
+            if ptype == "POINT_BY_BLOCK":
+                trail_color = (255, 0, 0)  # Blue (BGR)
+            elif ptype == "POINT_BY_SPIKE":
+                trail_color = (0, 0, 255)  # Red (BGR)
+            else:
+                trail_color = (0, 255, 0)
+
         if not config.HEADLESS_MODE:
             draw_players(frame, detections["players"])
-            draw_ball_trail(frame, tracker.trail_points(), max_points=10)
+            draw_ball_trail(frame, tracker.drawer_points(last_n=50), max_points=50, color=trail_color)
             draw_sidebar(frame, analytics.rally_mgr, analytics.counts, analytics.rally_counter)
 
             # ROI do marcador em verde
