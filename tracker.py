@@ -87,10 +87,13 @@ class VolleyballTracker:
         self.ball_kf = BallKalman()
         self.trail: Deque[Tuple[int, int]] = deque(maxlen=config.max_trail)
         self.ball_drawer: List[Tuple[float, float, float]] = []
-        self.ball_drawer_maxlen: int = 50
+        self.ball_drawer_maxlen: int = 200
         self.ball_drawer_jump_px: float = 700.0
         self.ball_drawer_jump_after_occlusion_px: float = 700.0
         self.ball_drawer_occlusion_frames: int = 5
+        self.ball_drawer_infill_min_missing_frames: int = 5
+        self.ball_drawer_infill_max_missing_frames: int = 10
+        self.ball_drawer_infill_net_dist_px: float = float(config.net_band_height_px) + 40.0
         self.ball_drawer_hold_s: float = 2.0
         self.ball_drawer_hold_until_ts: float = -1e9
         self.ball_drawer_clear_after_ts: Optional[float] = None
@@ -100,6 +103,7 @@ class VolleyballTracker:
         self.current_ball_side: Optional[str] = None
         self.side_streak_frames: int = 0
         self.attacking_side: Optional[str] = None
+        self.tocou_rede: bool = False
         self.last_ball_detected = False
         self.frames_since_ball = 0
         self.ball_id = 1
@@ -204,7 +208,9 @@ class VolleyballTracker:
         if ball_candidates:
             ball_det = max(ball_candidates, key=lambda b: b["conf"])
             self.update_possession((float(ball_det["center"][0]), float(ball_det["center"][1])))
-            self._append_ball_drawer(float(ball_det["center"][0]), float(ball_det["center"][1]), float(time.time()))
+            now_t = float(time.time())
+            self._infill_ball_drawer_gap_if_needed(float(ball_det["center"][0]), float(ball_det["center"][1]), now_t)
+            self._append_ball_drawer(float(ball_det["center"][0]), float(ball_det["center"][1]), now_t)
             self.ball_missing = 0
             self.ball_last_det = dict(ball_det)
         else:
@@ -276,40 +282,90 @@ class VolleyballTracker:
             del self.ball_drawer[:overflow]
         print(f"A adicionar à gaveta: {x}, {y}. Total agora: {len(self.ball_drawer)}")
 
+    def _infill_ball_drawer_gap_if_needed(self, x: float, y: float, t: float) -> None:
+        if not self.ball_drawer:
+            return
+        missing = int(self.frames_since_ball)
+        if missing < self.ball_drawer_infill_min_missing_frames or missing > self.ball_drawer_infill_max_missing_frames:
+            return
+
+        last_x, last_y, last_t = self.ball_drawer[-1]
+        dist_last_net = self._dist_to_net_line((float(last_x), float(last_y)))
+        dist_now_net = self._dist_to_net_line((float(x), float(y)))
+        if min(dist_last_net, dist_now_net) > self.ball_drawer_infill_net_dist_px:
+            return
+
+        if missing <= 1:
+            return
+
+        added = 0
+        for i in range(1, missing):
+            alpha = i / float(missing)
+            ix = float(last_x + (float(x) - float(last_x)) * alpha)
+            iy = float(last_y + (float(y) - float(last_y)) * alpha)
+            if abs(ix) < 1e-6 and abs(iy) < 1e-6:
+                continue
+            if not self._inside_field_roi((ix, iy)):
+                continue
+            if float(t) > float(last_t):
+                it = float(last_t + (float(t) - float(last_t)) * alpha)
+            else:
+                it = float(last_t + (1e-3 * i))
+            self.ball_drawer.append((ix, iy, it))
+            added += 1
+
+        if added > 0:
+            self._prune_isolated_outlier()
+            if len(self.ball_drawer) > self.ball_drawer_maxlen:
+                overflow = len(self.ball_drawer) - self.ball_drawer_maxlen
+                del self.ball_drawer[:overflow]
+            print(f"[INFILL] Gap de {missing} frames junto a rede. Pontos interpolados: {added}.")
+
     def drawer_snapshot(self) -> List[Tuple[float, float, float]]:
-        return list(self.ball_drawer)
+        return self._ordered_ball_drawer()
 
     def drawer_points(self, last_n: Optional[int] = None) -> List[Tuple[int, int]]:
-        pts = [(int(p[0]), int(p[1])) for p in self.ball_drawer]
+        ordered = self._ordered_ball_drawer()
+        # Require at least 3 ordered points to infer a stable direction.
+        if len(ordered) < 3:
+            return []
+        pts = [(int(p[0]), int(p[1])) for p in ordered]
         if last_n is not None:
-            return pts[-last_n:]
+            target_n = max(3, int(last_n))
+            if len(pts) <= target_n:
+                return pts
+            # Return a compressed full-rally trail so visual debug keeps the whole rally on screen.
+            idxs = np.linspace(0, len(pts) - 1, num=target_n, dtype=np.int32).tolist()
+            return [pts[i] for i in idxs]
         return pts
 
     def clear_ball_drawer(self) -> None:
         self.ball_drawer.clear()
         self.ball_drawer_hold_until_ts = -1e9
         self.ball_drawer_clear_after_ts = None
+        self.tocou_rede = False
 
     def reset_drawer_for_service(self, x: float, y: float, t: float) -> None:
         self.clear_ball_drawer()
+        self.current_ball_side = None
+        self.side_streak_frames = 0
+        self.attacking_side = None
+        self.pending_net_occlusion = None
         if abs(float(x)) < 1e-6 and abs(float(y)) < 1e-6:
             return
         self.ball_drawer.append((float(x), float(y), float(t)))
         side = self._side_from_pixel((float(x), float(y)))
         self.current_ball_side = side
         self.side_streak_frames = 1
-        if self.attacking_side is None and side is not None:
-            self.attacking_side = side
         print(f"A adicionar à gaveta: {x}, {y}. Total agora: {len(self.ball_drawer)}")
 
     def defer_clear_ball_drawer(self, clear_at_ts: float) -> None:
-        self.ball_drawer_clear_after_ts = float(clear_at_ts)
+        # Disabled for rally persistence: drawer reset must happen only on service/OCR.
+        self.ball_drawer_clear_after_ts = None
 
     def _maybe_clear_ball_drawer(self, timestamp_s: float) -> None:
-        if self.ball_drawer_clear_after_ts is None:
-            return
-        if timestamp_s >= self.ball_drawer_clear_after_ts:
-            self.clear_ball_drawer()
+        # Disabled for rally persistence: keep full drawer during the rally.
+        return
 
     def _inside_field_roi(self, pixel_pt: Tuple[float, float]) -> bool:
         x, y = float(pixel_pt[0]), float(pixel_pt[1])
@@ -345,6 +401,11 @@ class VolleyballTracker:
         if d01 > self.ball_drawer_outlier_px and d12 > self.ball_drawer_outlier_px and d02 < self.ball_drawer_outlier_bridge_px:
             del self.ball_drawer[-2]
 
+    def _ordered_ball_drawer(self) -> List[Tuple[float, float, float]]:
+        if len(self.ball_drawer) < 2:
+            return list(self.ball_drawer)
+        return sorted(self.ball_drawer, key=lambda p: float(p[2]))
+
     def detect_net_event(
         self,
         ball_state: BallState,
@@ -375,6 +436,7 @@ class VolleyballTracker:
 
         self.prev_ball_visible = ball_state.visible
         if event is not None:
+            self.tocou_rede = True
             self.recent_net_events.append(event)
             self.last_net_event_frame = frame_idx
         return event

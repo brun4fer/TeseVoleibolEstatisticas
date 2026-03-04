@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass, field
+import time
 import re
 from typing import Deque, Dict, List, Optional, Tuple
 
@@ -267,15 +268,18 @@ class AnalyticsEngine:
         self.prev_score: Optional[Tuple[int, int, int, int]] = None
         self.pending_score_change: Optional[Tuple[int, int, int, int]] = None
         self.pending_score_change_ts: Optional[float] = None
+        self.pending_score_drawer_snapshot: Optional[List[Tuple[float, float, float]]] = None
+        self.point_finalized: bool = False
         self.post_mortem_wait_s: float = 0.5
         self.rally_counter: int = 0
         self.ball_drawer: List[Tuple[float, float, float]] = []
-        self.ball_drawer_maxlen: int = 50
+        self.ball_drawer_maxlen: int = 200
         self.current_side: Optional[str] = None  # CampoA | CampoB
         self.side_since_ts: Optional[float] = None
         self.possession_time: float = 0.0
         self.possession_team: Optional[str] = None
         self.serving_side: Optional[str] = None
+        self.last_service_side: Optional[str] = None
         self.attacking_side: Optional[str] = None
         self.point_started: bool = False
 
@@ -305,6 +309,7 @@ class AnalyticsEngine:
         self.force_block_window_s = 5.0
         self.last_net_touch_time: Optional[float] = None
         self.last_net_touch_attack_side: Optional[str] = None
+        self.tocou_rede: bool = False
         self.last_seen_side_b_time: Optional[float] = None
         self.prev_visible_in_block_zone: bool = False
         self.net_top_y: float = 0.0
@@ -333,11 +338,23 @@ class AnalyticsEngine:
         self.event_attack_ts: Optional[float] = None
         self.event_impact_ts: Optional[float] = None
         self.event_rebouce_ts: Optional[float] = None
+        self.estado_retorno_detectado: bool = False
         self.prev_visible_side: Optional[str] = None
         self.prev_visible_dist_to_net: Optional[float] = None
         self.net_zone_half_width_px: float = float(getattr(config, "zone_block_half_width_px", 60))
         self.zone_block_below_px: float = float(getattr(config, "zone_block_below_px", 20))
         self.zone_block_above_px: float = float(getattr(config, "zone_block_above_px", 100))
+        self.net_proximity_threshold: float = 150.0
+        self.ghost_attack_away_delta_px: float = 8.0
+        self.ghost_attack_vx_thresh_px: float = 12.0
+
+    @property
+    def toucou_rede(self) -> bool:
+        return bool(self.tocou_rede)
+
+    @toucou_rede.setter
+    def toucou_rede(self, value: bool) -> None:
+        self.tocou_rede = bool(value)
 
     def _winner_from_score_change(self, new_score: Tuple[int, int, int, int]) -> str:
         if self.prev_score is None:
@@ -421,11 +438,114 @@ class AnalyticsEngine:
                 synced.append((float(p["x"]), float(p["y"]), float(p["t"])))
             else:
                 synced.append((float(p[0]), float(p[1]), float(p[2])))
+        synced.sort(key=lambda p: float(p[2]))
         self.ball_drawer = synced[-self.ball_drawer_maxlen :]
         tracker_attack_side = getattr(tracker, "attacking_side", None)
         if tracker_attack_side in ("CampoA", "CampoB"):
             self.attacking_side = tracker_attack_side
             self.attacking_team = self._team_for_side(tracker_attack_side)
+        if bool(getattr(tracker, "tocou_rede", False)):
+            self.tocou_rede = True
+
+    def _ordered_ball_drawer(self) -> List[Tuple[float, float, float]]:
+        if len(self.ball_drawer) < 2:
+            return list(self.ball_drawer)
+        return sorted(self.ball_drawer, key=lambda p: float(p[2]))
+
+    def _ordered_drawer_copy(self, drawer: Optional[List[Tuple[float, float, float]]] = None) -> List[Tuple[float, float, float]]:
+        source = self.ball_drawer if drawer is None else drawer
+        if not source:
+            return []
+        if len(source) < 2:
+            return [(float(source[0][0]), float(source[0][1]), float(source[0][2]))]
+        return sorted([(float(p[0]), float(p[1]), float(p[2])) for p in source], key=lambda p: float(p[2]))
+
+    def _drawer_time_bounds(
+        self,
+        fallback_x: float,
+        fallback_y: float,
+        fallback_t: float,
+        drawer: Optional[List[Tuple[float, float, float]]] = None,
+    ) -> Tuple[Tuple[float, float, float], Tuple[float, float, float]]:
+        ordered = self._ordered_drawer_copy(drawer)
+        if not ordered:
+            fb = (float(fallback_x), float(fallback_y), float(fallback_t))
+            return fb, fb
+        return ordered[0], ordered[-1]
+
+    def _drawer_early_attack_features(
+        self,
+        drawer: List[Tuple[float, float, float]],
+        tracker,
+    ) -> Tuple[float, bool, bool, float]:
+        ordered = self._ordered_drawer_copy(drawer)
+        if not ordered:
+            return 1e9, False, False, 0.0
+
+        x0, y0, _t0 = ordered[0]
+        _px, _py, dist_inicio_rede = self._line_projection((float(x0), float(y0)), tracker)
+
+        n = min(3, len(ordered))
+        sample = ordered[:n]
+        avg_vx = 0.0
+        if n >= 2:
+            avg_vx = float(sample[-1][0] - sample[0][0]) / float(n - 1)
+
+        (nx1, _ny1), (nx2, _ny2) = tracker.net_line
+        mid_x = (float(nx1) + float(nx2)) / 2.0
+        start_away = abs(float(sample[0][0]) - mid_x)
+        end_away = abs(float(sample[-1][0]) - mid_x)
+        moving_away_from_net = end_away > (start_away + self.ghost_attack_away_delta_px)
+
+        # Strong early horizontal velocity in the same direction away from the net.
+        strong_vx_attack = bool(moving_away_from_net and abs(avg_vx) >= self.ghost_attack_vx_thresh_px)
+
+        return float(dist_inicio_rede), bool(moving_away_from_net), bool(strong_vx_attack), float(avg_vx)
+
+    def _drawer_sides_history(self, drawer: List[Tuple[float, float, float]], tracker) -> List[str]:
+        ordered = self._ordered_drawer_copy(drawer)
+        sides: List[str] = []
+        for x, _y, _t in ordered:
+            side = self._side_from_x_position(float(x), tracker)
+            if side in ("CampoA", "CampoB"):
+                sides.append(side)
+        return sides
+
+    def _reset_for_new_service(self, tracker, source: str, seed_point: Optional[Tuple[float, float, float]] = None) -> None:
+        self.ball_drawer.clear()
+        self.tocou_rede = False
+        self.toucou_rede = False
+        self.point_finalized = False
+        self.pending_score_drawer_snapshot = None
+        self.attacking_side = None
+        self.attacking_team = None
+        self.ball_in_zone_flag = False
+        self.last_net_touch_time = None
+        self.last_net_touch_attack_side = None
+        self.pending_net_events.clear()
+        self.rebound_candidate = None
+        self.occlusion_candidate = None
+        self.last_visible_ball = None
+        self.last_ball_exit_net_side = None
+        self.last_route_collision_to_net = False
+        self.last_route_collision_ts = None
+        self.prev_visible_in_block_zone = False
+        self.estado_retorno_detectado = False
+        self._reset_event_state()
+
+        if seed_point is not None and hasattr(tracker, "reset_drawer_for_service"):
+            sx, sy, st = seed_point
+            tracker.reset_drawer_for_service(float(sx), float(sy), float(st))
+        elif hasattr(tracker, "clear_ball_drawer"):
+            tracker.clear_ball_drawer()
+
+        if hasattr(tracker, "attacking_side"):
+            tracker.attacking_side = None
+        if hasattr(tracker, "tocou_rede"):
+            tracker.tocou_rede = False
+
+        self._sync_ball_drawer(tracker)
+        print(f"[SERVICE-RESET] Origem: {source} | Gaveta e estado reiniciados.")
 
     def _drawer_max_y_near_net(self, tracker, timestamp_s: float) -> Optional[float]:
         if not self.ball_drawer:
@@ -453,19 +573,21 @@ class AnalyticsEngine:
         # y grows downwards; lower y means higher point.
         return float(min(ys))
 
-    def _drawer_passed_zone_block(self, tracker) -> bool:
-        if not self.ball_drawer:
+    def _drawer_passed_zone_block(self, tracker, drawer: Optional[List[Tuple[float, float, float]]] = None) -> bool:
+        ordered = self._ordered_drawer_copy(drawer)
+        if not ordered:
             return False
-        for x, y, _t in self.ball_drawer:
+        for x, y, _t in ordered:
             if self._point_in_block_zone((x, y), tracker):
                 return True
         return False
 
     def _drawer_crossed_net(self, tracker) -> bool:
-        if len(self.ball_drawer) < 2:
+        ordered = self._ordered_ball_drawer()
+        if len(ordered) < 2:
             return False
         prev_side: Optional[str] = None
-        for x, y, _t in self.ball_drawer:
+        for x, y, _t in ordered:
             s = self._side_from_ball((x, y), tracker)
             if s is None:
                 continue
@@ -486,29 +608,53 @@ class AnalyticsEngine:
     def _side_from_x_position(self, x: float, tracker) -> Optional[str]:
         (x1, _y1), (x2, _y2) = tracker.net_line
         mid_x = (float(x1) + float(x2)) / 2.0
-        return "CampoA" if float(x) <= mid_x else "CampoB"
+        return "CampoA" if float(x) < mid_x else "CampoB"
 
-    def check_post_mortem(self, tracker, end_side: Optional[str]) -> Tuple[str, Optional[str], Optional[str], bool]:
-        print(f"[DEBUG] Analisando gaveta com {len(self.ball_drawer)} frames para decisão final...")
+    def check_post_mortem(
+        self,
+        tracker,
+        end_side: Optional[str],
+        drawer: Optional[List[Tuple[float, float, float]]] = None,
+    ) -> Tuple[str, Optional[str], Optional[str], bool]:
+        if drawer is None and (not self.ball_drawer or len(self.ball_drawer) < 2):
+            return "ERROR", None, end_side, False
+        base_drawer = self._ordered_drawer_copy(drawer)
+        if not base_drawer or len(base_drawer) < 2:
+            return "ERROR", None, end_side, False
         try:
-            if len(self.ball_drawer) < 2:
-                return "ERROR", None, end_side, False
-
-            x_start = float(self.ball_drawer[0][0])
-            x_end = float(self.ball_drawer[-1][0])
+            x_start = float(base_drawer[0][0])
+            y_start = float(base_drawer[0][1])
+            x_end = float(base_drawer[-1][0])
             side_origin = self._side_from_x_position(x_start, tracker)
             side_dest = self._side_from_x_position(x_end, tracker)
+            same_side = side_origin is not None and side_dest is not None and side_origin == side_dest
 
-            passed_zone_block = self._drawer_passed_zone_block(tracker)
-            crossed_net = side_origin != side_dest or self._drawer_crossed_net(tracker)
-            if abs(x_end - x_start) > 200.0 and passed_zone_block:
-                crossed_net = True
+            _px, _py, dist_rede_inicio = self._line_projection((x_start, y_start), tracker)
+            passed_zone_block = self._drawer_passed_zone_block(tracker, drawer=base_drawer)
+            impacto_rede_detectado = bool(
+                passed_zone_block
+                or self.ball_in_zone_flag
+                or self.event_impact_ts is not None
+                or self.event_state == self.STATE_IMPACTO
+                or self.estado_retorno_detectado
+                or self.event_rebouce_ts is not None
+                or self.tocou_rede
+            )
 
-            if crossed_net:
-                return "SPIKE", side_origin, side_dest, True
-            if side_origin is not None and side_dest is not None and side_origin == side_dest and passed_zone_block:
-                return "BLOCK", side_origin, side_dest, False
-            return "ERROR", side_origin, side_dest, False
+            if side_origin is None or side_dest is None:
+                resultado = "ERROR"
+            elif side_origin != side_dest:
+                resultado = "SPIKE"
+            elif impacto_rede_detectado and dist_rede_inicio <= self.net_proximity_threshold:
+                resultado = "BLOCK"
+            else:
+                resultado = "ERROR"
+
+            print(
+                f"[DECISION] Frames: {len(base_drawer)} | Lados Iguais: {same_side} | "
+                f"Distância: {dist_rede_inicio:.1f}px | Resultado: {resultado}."
+            )
+            return resultado, side_origin, side_dest, not same_side
         except Exception:
             return "ERROR", None, end_side, False
 
@@ -516,7 +662,7 @@ class AnalyticsEngine:
         # Post-mortem over the full global drawer (last 50 detections).
         if not self.ball_drawer:
             return False, None, None
-        recent = list(self.ball_drawer)
+        recent = self._ordered_ball_drawer()
         if len(recent) < 2:
             return False, None, None
 
@@ -552,6 +698,7 @@ class AnalyticsEngine:
             return
         self.last_net_touch_time = float(timestamp_s)
         self.last_net_touch_attack_side = resolved_attack_side
+        self.tocou_rede = True
         self.attacking_team = self._team_for_side(resolved_attack_side)
 
     def _retroactive_block_from_hit_memory(self, winner: str, end_side: Optional[str], timestamp_s: float) -> bool:
@@ -628,6 +775,7 @@ class AnalyticsEngine:
                     if falling_on_attacker_side or away_from_net or appeared_now:
                         self.event_state = self.STATE_REBOUCE
                         self.event_rebouce_ts = timestamp_s
+                        self.estado_retorno_detectado = True
                         print("[STATE] Impacto na Rede -> [STATE] Bola voltou para o atacante")
                         self._register_net_event(
                             event_type="POINT_BY_BLOCK",
@@ -842,14 +990,12 @@ class AnalyticsEngine:
 
     def update_stats(self, baseline_ptype: str, winner: str, timestamp_s: float) -> str:
         """
-        Resolve final point type with pending-net priority.
-        POINT_BY_BLOCK has top priority over fallback labels (including OPPONENT_ERROR).
+        Stats lock:
+        this function is only allowed to run once OCR has confirmed a score change.
+        Net events are annotations and cannot finalize stats on their own.
         """
-        confirmed_net_ptype = self._confirm_net_event(winner, timestamp_s)
-        if confirmed_net_ptype == "POINT_BY_BLOCK":
-            return "POINT_BY_BLOCK"
-        if confirmed_net_ptype is not None:
-            return confirmed_net_ptype
+        if not self.point_finalized:
+            return baseline_ptype
         return baseline_ptype
 
     def _update_rebound_event(self, ball_state, ball_px: Tuple[float, float], side: Optional[str], dist_to_net: float, frame_idx: int, timestamp_s: float, tracker) -> None:
@@ -945,6 +1091,7 @@ class AnalyticsEngine:
         Update rally state and return (rally_finished, point_label).
         Stats are only recorded when OCR confirms a score change.
         """
+        self.point_finalized = False
         self._sync_ball_drawer(tracker)
 
         ball_px = (float(ball_state.pixel[0]), float(ball_state.pixel[1]))
@@ -980,9 +1127,10 @@ class AnalyticsEngine:
                 self.last_route_collision_ts = float(timestamp_s)
 
         vetor_mesma_posse = False
-        if len(self.ball_drawer) >= 2:
-            lado0 = self._side_from_x_position(float(self.ball_drawer[0][0]), tracker)
-            lado1 = self._side_from_x_position(float(self.ball_drawer[-1][0]), tracker)
+        ordered_drawer = self._ordered_ball_drawer()
+        if len(ordered_drawer) >= 2:
+            lado0 = self._side_from_x_position(float(ordered_drawer[0][0]), tracker)
+            lado1 = self._side_from_x_position(float(ordered_drawer[-1][0]), tracker)
             vetor_mesma_posse = lado0 is not None and lado1 is not None and lado0 == lado1
         cv2.putText(
             frame,
@@ -1005,15 +1153,14 @@ class AnalyticsEngine:
             if not self.point_started:
                 inferred_service_side = side if side is not None else self.current_side
                 if inferred_service_side is not None:
-                    if hasattr(tracker, "reset_drawer_for_service"):
-                        tracker.reset_drawer_for_service(float(ball_px[0]), float(ball_px[1]), float(timestamp_s))
-                        self._sync_ball_drawer(tracker)
+                    self._reset_for_new_service(
+                        tracker,
+                        source="SERVICO",
+                        seed_point=(float(ball_px[0]), float(ball_px[1]), float(timestamp_s)),
+                    )
                     self.serving_side = inferred_service_side
+                    self.last_service_side = inferred_service_side
                     self.point_started = True
-                    # Attacking side is now dynamic and updated by tracker possession.
-                    if self.attacking_side is None:
-                        self.attacking_side = inferred_service_side
-                        self.attacking_team = self._team_for_side(inferred_service_side)
 
             self._update_possession(side, timestamp_s)
             if side == "CampoB":
@@ -1021,6 +1168,7 @@ class AnalyticsEngine:
 
             if in_block_zone:
                 self.ball_in_zone_flag = True
+                self.tocou_rede = True
                 attack_side = self._resolve_attack_side(side)
                 if attack_side is None and self.last_seen_side_b_time is not None and (timestamp_s - self.last_seen_side_b_time) <= self.hit_memory_window_s:
                     attack_side = "CampoB"
@@ -1071,6 +1219,7 @@ class AnalyticsEngine:
                 if self.pending_score_change is None or self.pending_score_change != score:
                     self.pending_score_change = score
                     self.pending_score_change_ts = timestamp_s
+                    self.pending_score_drawer_snapshot = self._ordered_ball_drawer()
 
         rally_finished = False
         point_label = None
@@ -1084,19 +1233,24 @@ class AnalyticsEngine:
 
             if self.pending_score_change_ts is None:
                 self.pending_score_change_ts = timestamp_s
-            if len(self.ball_drawer) <= 1 and (timestamp_s - self.pending_score_change_ts) < self.post_mortem_wait_s:
+            analysis_drawer = self._ordered_drawer_copy(self.pending_score_drawer_snapshot)
+            if not analysis_drawer:
+                analysis_drawer = self._ordered_ball_drawer()
+
+            if len(analysis_drawer) <= 1 and (timestamp_s - self.pending_score_change_ts) < self.post_mortem_wait_s:
                 return rally_finished, point_label
 
+            time.sleep(0.001)
+
             winner = self._winner_from_score_change(self.pending_score_change)
-            current_time = timestamp_s
-            force_block_recent_touch = (
-                self.last_net_touch_time is not None
-                and (current_time - self.last_net_touch_time) <= self.force_block_window_s
+            drawer_start, drawer_end = self._drawer_time_bounds(
+                fallback_x=float(ball_px[0]),
+                fallback_y=float(ball_px[1]),
+                fallback_t=float(timestamp_s),
+                drawer=analysis_drawer,
             )
-            x_inicio = float(self.ball_drawer[0][0]) if self.ball_drawer else float(ball_px[0])
-            x_fim = float(self.ball_drawer[-1][0]) if self.ball_drawer else float(ball_px[0])
+            x_inicio = float(drawer_start[0])
             lado_origem = self._side_from_x_position(x_inicio, tracker)
-            lado_destino = self._side_from_x_position(x_fim, tracker)
 
             # Keep attacker side/team synchronized with trajectory origin.
             self.attacking_side = lado_origem
@@ -1104,49 +1258,53 @@ class AnalyticsEngine:
             if equipe_atacante_real != "Unknown":
                 self.attacking_team = equipe_atacante_real
 
-            passed_zone_block = self._drawer_passed_zone_block(tracker)
-            touched_net = passed_zone_block or self.ball_in_zone_flag or force_block_recent_touch
-            same_side = lado_origem is not None and lado_destino is not None and (lado_origem == lado_destino)
-            crossed_side = lado_origem is not None and lado_destino is not None and (lado_origem != lado_destino)
-
-            decision_result = "ERROR"
+            decision_result, lado_origem_pm, lado_destino_pm, _crossed_pm = self.check_post_mortem(
+                tracker=tracker,
+                end_side=None,
+                drawer=analysis_drawer,
+            )
+            resultado = decision_result
+            if lado_origem_pm is not None:
+                lado_origem = lado_origem_pm
             ptype = "OPPONENT_ERROR"
-
-            # Absolute side-based decision logic (highest priority on score change).
-            if crossed_side:
-                ptype = "POINT_BY_SPIKE"
-                decision_result = "SPIKE"
-            elif same_side and touched_net:
+            if resultado == "BLOCK":
                 ptype = "POINT_BY_BLOCK"
-                decision_result = "BLOCK"
+            elif resultado == "SPIKE":
+                ptype = "POINT_BY_SPIKE"
             else:
                 ptype = "OPPONENT_ERROR"
-                decision_result = "ERROR"
 
-            print(
-                f"[DECISION] Lado Inicio: {lado_origem} | "
-                f"Lado Fim: {lado_destino} | Impacto Rede: {touched_net} -> "
-                f"Resultado Final: {decision_result}."
-            )
+            self.point_finalized = True
+            ptype = self.update_stats(baseline_ptype=ptype, winner=winner, timestamp_s=timestamp_s)
 
             self.prev_score = self.pending_score_change
             self.pending_score_change = None
             self.pending_score_change_ts = None
+            self.pending_score_drawer_snapshot = None
             self.rally_counter += 1
 
-            # End-of-rally cleanup for next possession/event cycle.
-            self.pending_net_events.clear()
-            self.rebound_candidate = None
-            self.occlusion_candidate = None
-            self.last_visible_ball = None
-            self.last_ball_exit_net_side = None
-            self.last_net_touch_time = None
-            self.last_net_touch_attack_side = None
-            self.attacking_team = None
-            self.ball_in_zone_flag = False
+            self.rally_mgr.end(
+                ts=timestamp_s,
+                frame_idx=frame_idx,
+                winner=winner,
+                ptype=resultado,
+                max_speed=tracker._instant_speed(),
+                impact=ball_state.court,
+                reason="score_change",
+            )
+            if self.point_finalized:
+                if resultado == "SPIKE":
+                    self.counts["Spikes"] += 1
+                    self.counts["POINT_BY_SPIKE"] += 1
+                elif resultado == "BLOCK":
+                    self.counts["Blocks"] += 1
+                    self.counts["POINT_BY_BLOCK"] += 1
+                elif resultado == "ERROR":
+                    self.counts["OPPONENT_ERROR"] += 1
+
+            # End-of-rally cleanup for next possession/event cycle (hard reset).
+            self._reset_for_new_service(tracker, source="OCR")
             self.last_valid_y = None
-            self.last_route_collision_to_net = False
-            self.last_route_collision_ts = None
             self.prev_valid_ball_px = None
             self.prev_prev_valid_ball_px = None
             self.side_frame_streak = 0
@@ -1155,35 +1313,12 @@ class AnalyticsEngine:
             self.last_seen_side_b_time = None
             self.prev_visible_side = None
             self.prev_visible_dist_to_net = None
-            self.prev_visible_in_block_zone = False
-            self._reset_event_state()
             self.prev_ball_visible = False
             self.point_started = False
             self.serving_side = None
-            self.attacking_side = None
-            self.ball_drawer = []
-            if hasattr(tracker, "clear_ball_drawer"):
-                tracker.clear_ball_drawer()
 
-            self.rally_mgr.end(
-                ts=timestamp_s,
-                frame_idx=frame_idx,
-                winner=winner,
-                ptype=ptype,
-                max_speed=tracker._instant_speed(),
-                impact=ball_state.court,
-                reason="score_change",
-            )
-            if ptype in self.counts:
-                self.counts[ptype] += 1
-            if ptype == "POINT_BY_SPIKE":
-                self.counts["Spikes"] += 1
-            if ptype == "POINT_BY_BLOCK":
-                self.counts["Blocks"] += 1
-            elif ptype == "BOLA_NA_REDE":
-                self.counts["Bolas na Rede"] += 1
             rally_finished = True
-            point_label = ptype
+            point_label = resultado
 
         return rally_finished, point_label
 
