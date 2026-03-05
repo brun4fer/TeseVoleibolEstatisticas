@@ -9,9 +9,8 @@ Rally event/statistics engine for volleyball.
 
 from __future__ import annotations
 
-from collections import deque
+from collections import Counter, deque
 from dataclasses import dataclass, field
-import time
 import re
 from typing import Deque, Dict, List, Optional, Tuple
 
@@ -28,21 +27,75 @@ class ScoreboardOCR:
     def __init__(self):
         self.reader = easyocr.Reader(list(config.score_reader_lang), gpu=True)
         self.stable_score: Optional[Tuple[int, int, int, int]] = None
-        self.pending_score: Optional[Tuple[int, int, int, int]] = None
-        self.pending_count: int = 0
+        self.last_raw_score: Optional[Tuple[int, int, int, int]] = None
+        self.last_returned_score: Optional[Tuple[int, int, int, int]] = None
+        self.last_read_discarded: bool = False
+        self.vote_window: Deque[Tuple[int, int, int, int]] = deque(maxlen=5)
+        self.vote_min_hits: int = 3
         self.old_formatted: Optional[str] = None
 
-    def _extract_line(self, img) -> Tuple[int, int]:
-        nums = re.findall(r"\d+", img)
-        if len(nums) >= 2:
-            return int(nums[0]), int(nums[1])
-        if len(nums) == 1:
-            return 0, int(nums[0])
-        return 0, 0
+    def _extreme_binary(self, img, invert: bool = False):
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if len(img.shape) == 3 else img
+        blur = cv2.GaussianBlur(gray, (3, 3), 0)
+        mode = cv2.THRESH_BINARY_INV if invert else cv2.THRESH_BINARY
+        out = cv2.threshold(blur, 0, 255, mode + cv2.THRESH_OTSU)[1]
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
+        out = cv2.morphologyEx(out, cv2.MORPH_OPEN, kernel, iterations=1)
+        out = cv2.morphologyEx(out, cv2.MORPH_CLOSE, kernel, iterations=1)
+        return out
+
+    def _ocr_digits_only(self, img) -> str:
+        txt = "".join(self.reader.readtext(img, allowlist="0123456789", detail=0))
+        nums = re.findall(r"\d+", txt)
+        return "".join(nums) if nums else ""
+
+    def _to_int(self, txt: str, default: int = 0) -> int:
+        if not txt:
+            return default
+        try:
+            return int(txt)
+        except ValueError:
+            return default
+
+    def _is_plausible_step(
+        self,
+        prev_score: Optional[Tuple[int, int, int, int]],
+        new_score: Tuple[int, int, int, int],
+    ) -> bool:
+        na_set, na_pts, nb_set, nb_pts = new_score
+
+        # Hard sanity limits to reject OCR explosions such as 32-6.
+        if not (0 <= na_set <= 5 and 0 <= nb_set <= 5 and 0 <= na_pts <= 60 and 0 <= nb_pts <= 60):
+            return False
+
+        if prev_score is None:
+            return True
+        if new_score == prev_score:
+            return True
+
+        pa_set, pa_pts, pb_set, pb_pts = prev_score
+
+        # Priority rule: prefer single logical digit progression.
+        if na_set == pa_set and nb_set == pb_set:
+            da = na_pts - pa_pts
+            db = nb_pts - pb_pts
+            return (da == 1 and db == 0) or (da == 0 and db == 1)
+
+        # Allow set increment transition with points reset/near reset.
+        if na_set == pa_set + 1 and nb_set == pb_set and na_pts <= 2 and nb_pts <= 2:
+            return True
+        if nb_set == pb_set + 1 and na_set == pa_set and na_pts <= 2 and nb_pts <= 2:
+            return True
+        return False
 
     def read(self, frame) -> Optional[Tuple[int, int, int, int]]:
         x, y, w, h = config.score_roi
         roi = frame[y : y + h, x : x + w]
+        if not getattr(config, "HEADLESS_MODE", False):
+            dbg = frame.copy()
+            cv2.rectangle(dbg, (x, y), (x + w, y + h), (0, 255, 0), 2)
+            cv2.imshow("DEBUG_OCR_ROI", dbg)
+
         # Top line = Team A, bottom line = Team B
         mid_h = h // 2
         top = roi[0:mid_h, :]
@@ -57,15 +110,9 @@ class ScoreboardOCR:
             set_up = cv2.resize(zone_set, None, fx=3.0, fy=3.0, interpolation=cv2.INTER_CUBIC)
             pts_up = cv2.resize(zone_pts, None, fx=3.0, fy=3.0, interpolation=cv2.INTER_CUBIC)
 
-            set_gray = cv2.cvtColor(set_up, cv2.COLOR_BGR2GRAY)
-            pts_gray = cv2.cvtColor(pts_up, cv2.COLOR_BGR2GRAY)
-
-            set_bin = cv2.threshold(set_gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
-            pts_bin = cv2.threshold(pts_gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1]
-
-            k = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
-            set_bin = cv2.dilate(set_bin, k, iterations=1)
-            pts_bin = cv2.dilate(pts_bin, k, iterations=1)
+            # Extreme contrast pass to remove background and highlight digits.
+            set_bin = self._extreme_binary(set_up, invert=True)
+            pts_bin = self._extreme_binary(pts_up, invert=True)
 
             combined = cv2.hconcat([set_bin, pts_bin])
             return set_bin, pts_bin, combined
@@ -73,24 +120,27 @@ class ScoreboardOCR:
         set_top, pts_top, comb_top = split_and_process(top)
         set_bot, pts_bot, comb_bot = split_and_process(bot)
 
-        txt_set_top = "".join(self.reader.readtext(set_top, allowlist="0123456789", detail=0))
-        txt_pts_top = "".join(self.reader.readtext(pts_top, allowlist="0123456789", detail=0))
-        txt_set_bot = "".join(self.reader.readtext(set_bot, allowlist="0123456789", detail=0))
-        txt_pts_bot = "".join(self.reader.readtext(pts_bot, allowlist="0123456789", detail=0))
+        txt_set_top = self._ocr_digits_only(set_top)
+        txt_pts_top = self._ocr_digits_only(pts_top)
+        txt_set_bot = self._ocr_digits_only(set_bot)
+        txt_pts_bot = self._ocr_digits_only(pts_bot)
 
-        a_set = int(re.findall(r"\d+", txt_set_top)[0]) if re.findall(r"\d+", txt_set_top) else 0
-        b_set = int(re.findall(r"\d+", txt_set_bot)[0]) if re.findall(r"\d+", txt_set_bot) else 0
+        a_set = self._to_int(txt_set_top[:1], default=0)
+        b_set = self._to_int(txt_set_bot[:1], default=0)
+        a_pts = self._to_int(txt_pts_top[:2], default=0)
+        b_pts = self._to_int(txt_pts_bot[:2], default=0)
 
-        def extract_points(txt: str) -> int:
-            nums = re.findall(r"\d+", txt)
-            if not nums:
-                return 0
-            return int("".join(nums))
-
-        a_pts = extract_points(txt_pts_top)
-        b_pts = extract_points(txt_pts_bot)
-
-        parsed = (a_set, a_pts, b_set, b_pts)
+        parsed_raw = (a_set, a_pts, b_set, b_pts)
+        self.last_raw_score = parsed_raw
+        parsed = parsed_raw
+        discard_candidate = False
+        if not self._is_plausible_step(self.stable_score, parsed):
+            # Keep previous stable reading when OCR suggests impossible transitions.
+            if self.stable_score is not None:
+                parsed = self.stable_score
+            else:
+                discard_candidate = True
+        self.last_read_discarded = bool(discard_candidate)
 
         h_dbg = max(comb_top.shape[0], comb_bot.shape[0])
         w_dbg = max(comb_top.shape[1], comb_bot.shape[1])
@@ -101,23 +151,23 @@ class ScoreboardOCR:
         cv2.line(canvas_bgr, (0, h_dbg + 1), (w_dbg, h_dbg + 1), (0, 0, 255), 2)
         cv2.line(canvas_bgr, (int(w_dbg * 0.3), 0), (int(w_dbg * 0.3), h_dbg), (0, 0, 255), 2)
         cv2.line(canvas_bgr, (int(w_dbg * 0.3), h_dbg + 3), (int(w_dbg * 0.3), h_dbg + 3 + h_dbg), (0, 0, 255), 2)
-        cv2.imshow("DEBUG_OCR", canvas_bgr)
-        cv2.waitKey(1)
+        if not getattr(config, "HEADLESS_MODE", False):
+            cv2.imshow("DEBUG_OCR", canvas_bgr)
+            cv2.waitKey(1)
 
-        if self.pending_score == parsed:
-            self.pending_count += 1
-        else:
-            self.pending_score = parsed
-            self.pending_count = 1
+        if not discard_candidate:
+            self.vote_window.append(parsed)
+        if len(self.vote_window) == self.vote_window.maxlen:
+            most_common_score, hits = Counter(self.vote_window).most_common(1)[0]
+            if hits >= self.vote_min_hits and self.stable_score != most_common_score:
+                self.stable_score = most_common_score
+                set_num = most_common_score[0] + most_common_score[2] + 1
+                formatted = f"SET {set_num} ({most_common_score[1]}-{most_common_score[3]})"
+                if formatted != self.old_formatted:
+                    print(formatted)
+                    self.old_formatted = formatted
 
-        if self.pending_count >= 3 and self.stable_score != parsed:
-            self.stable_score = parsed
-            set_num = parsed[0] + parsed[2] + 1
-            formatted = f"SET {set_num} ({parsed[1]}-{parsed[3]})"
-            if formatted != self.old_formatted:
-                print(formatted)
-                self.old_formatted = formatted
-
+        self.last_returned_score = self.stable_score
         return self.stable_score
 
 
@@ -264,17 +314,41 @@ class AnalyticsEngine:
             "Spikes": 0,
             "Blocks": 0,
             "Bolas na Rede": 0,
+            "Rallies": 0,
         }
         self.prev_score: Optional[Tuple[int, int, int, int]] = None
         self.pending_score_change: Optional[Tuple[int, int, int, int]] = None
         self.pending_score_change_ts: Optional[float] = None
         self.pending_score_drawer_snapshot: Optional[List[Tuple[float, float, float]]] = None
+        self.pending_score_prev_base: Optional[Tuple[int, int, int, int]] = None
+        self.pending_score_forced: bool = False
+        self.invalid_ocr_candidate: Optional[Tuple[int, int, int, int]] = None
+        self.valor_bloqueado_ocr: Optional[Tuple[int, int, int, int]] = None
+        self.valor_recuperacao_ocr: Optional[Tuple[int, int, int, int]] = None
+        self.valor_bloqueado_ocr_until: float = -1e9
+        self.tentativas_ocr: int = 0
+        self.last_point_time: float = -1e9
+        self.point_cooldown_s: float = 10.0
+        self.ocr_blocked_until: float = -1e9
+        self.ocr_stabilization_lock_s: float = 5.0
+        self.ball_dead_confirm_s: float = 1.0
+        self.min_frames_for_technical_stats: int = 8
+        self.ball_missing_since: Optional[float] = None
+        self.ball_ground_stable_since: Optional[float] = None
+        self.last_ground_y: Optional[float] = None
+        self.ground_zone_ratio: float = 0.82
+        self.ground_stable_delta_px: float = 4.0
         self.point_finalized: bool = False
         self.post_mortem_wait_s: float = 0.5
         self.rally_counter: int = 0
         self.ball_drawer: List[Tuple[float, float, float]] = []
         self.ball_drawer_maxlen: int = 200
         self.current_side: Optional[str] = None  # CampoA | CampoB
+        self.current_possession: Optional[str] = None  # CampoA | CampoB (tracker continuous possession)
+        self.campo_posse_atual: Optional[str] = None  # CampoA | CampoB (global possession)
+        self.posse_atual: Optional[str] = None  # CampoA | CampoB (persistent possession)
+        self.last_attacker_before_net: Optional[str] = None  # CampoA | CampoB
+        self.last_ball_seen_ts: Optional[float] = None
         self.side_since_ts: Optional[float] = None
         self.possession_time: float = 0.0
         self.possession_team: Optional[str] = None
@@ -282,6 +356,10 @@ class AnalyticsEngine:
         self.last_service_side: Optional[str] = None
         self.attacking_side: Optional[str] = None
         self.point_started: bool = False
+        self.service_detection_locked: bool = False
+        self.last_ocr_score_stable: Optional[Tuple[int, int, int, int]] = None
+        self.last_ocr_score_raw: Optional[Tuple[int, int, int, int]] = None
+        self.score_just_updated: bool = False
 
         # Reactive timings for volleyball pace.
         self.possession_confirm_s = 0.3
@@ -324,6 +402,7 @@ class AnalyticsEngine:
         self.side_frame_streak: int = 0
         self.last_streak_side: Optional[str] = None
         self.possession_side_5frames: Optional[str] = None
+        self.rally_closed_by_scoreboard: bool = True
 
         # 3) Kalman bridge: keep ball track alive through brief net occlusions.
         config.ball_max_age_frames = 15
@@ -356,24 +435,188 @@ class AnalyticsEngine:
     def toucou_rede(self, value: bool) -> None:
         self.tocou_rede = bool(value)
 
-    def _winner_from_score_change(self, new_score: Tuple[int, int, int, int]) -> str:
-        if self.prev_score is None:
+    def _winner_from_score_change(
+        self,
+        new_score: Tuple[int, int, int, int],
+        prev_score: Optional[Tuple[int, int, int, int]] = None,
+    ) -> str:
+        base_prev = self.prev_score if prev_score is None else prev_score
+        if base_prev is None:
             return "Unknown"
-        if new_score[1] > self.prev_score[1]:
+        if new_score[1] > base_prev[1]:
             return "TeamA"
-        if new_score[3] > self.prev_score[3]:
+        if new_score[3] > base_prev[3]:
             return "TeamB"
-        if new_score[0] > self.prev_score[0]:
+        if new_score[0] > base_prev[0]:
             return "TeamA"
-        if new_score[2] > self.prev_score[2]:
+        if new_score[2] > base_prev[2]:
             return "TeamB"
         return "Unknown"
+
+    def _is_logical_score_change(
+        self,
+        prev_score: Optional[Tuple[int, int, int, int]],
+        new_score: Optional[Tuple[int, int, int, int]],
+    ) -> bool:
+        if prev_score is None or new_score is None:
+            return False
+        if new_score == prev_score:
+            return False
+
+        prev_a_set, prev_a_pts, prev_b_set, prev_b_pts = prev_score
+        new_a_set, new_a_pts, new_b_set, new_b_pts = new_score
+
+        # Strict +1 filter for rally ending:
+        # same set, one team +1 point, the other unchanged.
+        if prev_a_set != new_a_set or prev_b_set != new_b_set:
+            return False
+        if new_a_pts < prev_a_pts or new_b_pts < prev_b_pts:
+            return False
+        d_a = new_a_pts - prev_a_pts
+        d_b = new_b_pts - prev_b_pts
+        return (d_a == 1 and d_b == 0) or (d_a == 0 and d_b == 1)
 
     def _team_for_side(self, side: str) -> str:
         return "TeamA" if side == "CampoA" else "TeamB"
 
     def _other_side(self, side: str) -> str:
         return "CampoB" if side == "CampoA" else "CampoA"
+
+    def _score_plus_one(
+        self,
+        prev_score: Tuple[int, int, int, int],
+        winner_team: str,
+    ) -> Tuple[int, int, int, int]:
+        a_set, a_pts, b_set, b_pts = prev_score
+        if winner_team == "TeamA":
+            return (a_set, a_pts + 1, b_set, b_pts)
+        if winner_team == "TeamB":
+            return (a_set, a_pts, b_set, b_pts + 1)
+        return prev_score
+
+    def _infer_forced_score_from_invalid_read(
+        self,
+        prev_score: Optional[Tuple[int, int, int, int]],
+        invalid_score: Optional[Tuple[int, int, int, int]],
+    ) -> Optional[Tuple[int, int, int, int]]:
+        if prev_score is None or invalid_score is None:
+            return None
+        if prev_score[0] != invalid_score[0] or prev_score[2] != invalid_score[2]:
+            return None
+        changed_idxs = [i for i, (old_v, new_v) in enumerate(zip(prev_score, invalid_score)) if old_v != new_v]
+        if len(changed_idxs) != 1:
+            return None
+        changed_idx = changed_idxs[0]
+        # Progression +1 is only valid for points, not sets.
+        if changed_idx not in (1, 3):
+            return None
+        # If OCR already read the logical +1, do not force.
+        if invalid_score[changed_idx] == int(prev_score[changed_idx]) + 1:
+            return None
+        inferred = list(prev_score)
+        inferred[changed_idx] = int(prev_score[changed_idx]) + 1
+        inferred_score = tuple(inferred)
+        if not self._is_logical_score_change(prev_score, inferred_score):
+            return None
+        return inferred_score
+
+    def _infer_plus_one_from_dubious_read(
+        self,
+        prev_score: Optional[Tuple[int, int, int, int]],
+        dubious_score: Optional[Tuple[int, int, int, int]],
+    ) -> Optional[Tuple[int, int, int, int]]:
+        if prev_score is None or dubious_score is None:
+            return None
+        if dubious_score == prev_score:
+            return None
+
+        da = int(dubious_score[1]) - int(prev_score[1])
+        db = int(dubious_score[3]) - int(prev_score[3])
+
+        winner_team: Optional[str] = None
+        if da > 0 and db <= 0:
+            winner_team = "TeamA"
+        elif db > 0 and da <= 0:
+            winner_team = "TeamB"
+        elif da < 0 and db == 0:
+            winner_team = "TeamA"
+        elif db < 0 and da == 0:
+            winner_team = "TeamB"
+        elif abs(da) > abs(db) and da != 0:
+            winner_team = "TeamA"
+        elif abs(db) > abs(da) and db != 0:
+            winner_team = "TeamB"
+        else:
+            if self.last_attacker_before_net in ("CampoA", "CampoB"):
+                winner_team = self._team_for_side(self.last_attacker_before_net)
+            elif self.posse_atual in ("CampoA", "CampoB"):
+                winner_team = self._team_for_side(self.posse_atual)
+
+        if winner_team is None:
+            return None
+        return self._score_plus_one(prev_score, winner_team)
+
+    def _score_has_blacklisted_zeros(self, score: Optional[Tuple[int, int, int, int]]) -> bool:
+        if score is None or self.prev_score is None:
+            return False
+        if score == self.prev_score:
+            return False
+        prev_a_set, prev_a_pts, prev_b_set, prev_b_pts = self.prev_score
+        _new_a_set, new_a_pts, _new_b_set, new_b_pts = score
+        prev_progress = prev_a_pts + prev_b_pts
+        zeros_all = sum(1 for v in score if v == 0)
+
+        # Ignore hard zero patterns once the set is already advanced.
+        if prev_progress >= 4 and zeros_all >= 2:
+            return True
+        if prev_a_pts >= 4 and new_a_pts == 0:
+            return True
+        if prev_b_pts >= 4 and new_b_pts == 0:
+            return True
+        return False
+
+    def _update_ball_dead_state(self, ball_state, timestamp_s: float, frame_height: int) -> None:
+        if not ball_state.visible:
+            if self.ball_missing_since is None:
+                self.ball_missing_since = float(timestamp_s)
+            self.ball_ground_stable_since = None
+            self.last_ground_y = None
+            return
+
+        self.ball_missing_since = None
+        y = float(ball_state.pixel[1])
+        ground_y_min = float(frame_height) * self.ground_zone_ratio
+        if y < ground_y_min:
+            self.ball_ground_stable_since = None
+            self.last_ground_y = None
+            return
+
+        if self.last_ground_y is None or abs(y - self.last_ground_y) > self.ground_stable_delta_px:
+            self.ball_ground_stable_since = float(timestamp_s)
+            self.last_ground_y = y
+            return
+
+        self.last_ground_y = y
+
+    def _is_ball_dead(self, timestamp_s: float) -> bool:
+        if self.ball_missing_since is not None and (timestamp_s - self.ball_missing_since) >= self.ball_dead_confirm_s:
+            return True
+        if self.ball_ground_stable_since is not None and (timestamp_s - self.ball_ground_stable_since) >= self.ball_dead_confirm_s:
+            return True
+        return False
+
+    def _cooldown_remaining_s(self, timestamp_s: float) -> float:
+        return max(0.0, (self.last_point_time + self.point_cooldown_s) - timestamp_s)
+
+    def _set_ocr_block_value(self, value: Optional[Tuple[int, int, int, int]], timestamp_s: float) -> None:
+        self.valor_bloqueado_ocr = value
+        self.valor_bloqueado_ocr_until = -1e9
+
+    def _clear_ocr_block_value(self, announce: bool = False) -> None:
+        self.valor_bloqueado_ocr = None
+        self.valor_bloqueado_ocr_until = -1e9
+        if announce:
+            print("[OCR-INFO] Cadeado limpo. OCR pronto para nova leitura.")
 
     def _side_for_team(self, team: str) -> Optional[str]:
         if team == "TeamA":
@@ -444,6 +687,15 @@ class AnalyticsEngine:
         if tracker_attack_side in ("CampoA", "CampoB"):
             self.attacking_side = tracker_attack_side
             self.attacking_team = self._team_for_side(tracker_attack_side)
+        tracker_possession = getattr(tracker, "posse_atual", None)
+        if tracker_possession not in ("CampoA", "CampoB"):
+            tracker_possession = getattr(tracker, "campo_posse_atual", None)
+        if tracker_possession not in ("CampoA", "CampoB"):
+            tracker_possession = getattr(tracker, "current_possession", None)
+        if tracker_possession in ("CampoA", "CampoB"):
+            self.current_possession = tracker_possession
+            self.campo_posse_atual = tracker_possession
+            self.posse_atual = tracker_possession
         if bool(getattr(tracker, "tocou_rede", False)):
             self.tocou_rede = True
 
@@ -512,12 +764,32 @@ class AnalyticsEngine:
         return sides
 
     def _reset_for_new_service(self, tracker, source: str, seed_point: Optional[Tuple[float, float, float]] = None) -> None:
+        if source == "SERVICO":
+            if self.service_detection_locked:
+                return
+            tracker_drawer = getattr(tracker, "ball_drawer", [])
+            has_drawer_data = bool(self.ball_drawer) or bool(tracker_drawer)
+            if has_drawer_data and not self.rally_closed_by_scoreboard:
+                # Safety: never erase rally trajectory before OCR closes the point.
+                self.service_detection_locked = True
+                print("[SERVICE-RESET-BLOCK] Reset de serviço bloqueado: rally ainda aberto e gaveta já tem dados.")
+                return
+        if source == "SERVICO":
+            self.service_detection_locked = True
+        elif source == "OCR":
+            self.service_detection_locked = False
         self.ball_drawer.clear()
         self.tocou_rede = False
         self.toucou_rede = False
         self.point_finalized = False
         self.pending_score_drawer_snapshot = None
+        self.pending_score_prev_base = None
+        self.pending_score_forced = False
+        self.invalid_ocr_candidate = None
+        self.tentativas_ocr = 0
         self.attacking_side = None
+        # Keep possession state persistent across resets; attacker-before-net is rally-scoped.
+        self.last_attacker_before_net = None
         self.attacking_team = None
         self.ball_in_zone_flag = False
         self.last_net_touch_time = None
@@ -615,24 +887,30 @@ class AnalyticsEngine:
         tracker,
         end_side: Optional[str],
         drawer: Optional[List[Tuple[float, float, float]]] = None,
-    ) -> Tuple[str, Optional[str], Optional[str], bool]:
+        attacker_side: Optional[str] = None,
+    ) -> Optional[Tuple[str, Optional[str], Optional[str], bool]]:
         if drawer is None and (not self.ball_drawer or len(self.ball_drawer) < 2):
-            return "ERROR", None, end_side, False
+            return None
         base_drawer = self._ordered_drawer_copy(drawer)
         if not base_drawer or len(base_drawer) < 2:
-            return "ERROR", None, end_side, False
+            return None
         try:
-            x_start = float(base_drawer[0][0])
-            y_start = float(base_drawer[0][1])
-            x_end = float(base_drawer[-1][0])
-            side_origin = self._side_from_x_position(x_start, tracker)
-            side_dest = self._side_from_x_position(x_end, tracker)
-            same_side = side_origin is not None and side_dest is not None and side_origin == side_dest
+            x_end, y_end, _ = base_drawer[-1]
+            x_start, y_start, _ = base_drawer[0]
+            side_start_drawer = self._side_from_ball((float(x_start), float(y_start)), tracker)
+            lado_fim = self._side_from_ball((float(x_end), float(y_end)), tracker)
+            lado_atacante = attacker_side if attacker_side in ("CampoA", "CampoB") else self.last_attacker_before_net
+            if lado_atacante not in ("CampoA", "CampoB"):
+                lado_atacante = self.posse_atual
+            if lado_atacante not in ("CampoA", "CampoB"):
+                lado_atacante = self.campo_posse_atual
+            if lado_atacante not in ("CampoA", "CampoB"):
+                lado_atacante = self.current_possession
+            if lado_atacante not in ("CampoA", "CampoB"):
+                lado_atacante = side_start_drawer
 
-            _px, _py, dist_rede_inicio = self._line_projection((x_start, y_start), tracker)
-            passed_zone_block = self._drawer_passed_zone_block(tracker, drawer=base_drawer)
-            impacto_rede_detectado = bool(
-                passed_zone_block
+            tocou_rede = bool(
+                self._drawer_passed_zone_block(tracker, drawer=base_drawer)
                 or self.ball_in_zone_flag
                 or self.event_impact_ts is not None
                 or self.event_state == self.STATE_IMPACTO
@@ -640,23 +918,21 @@ class AnalyticsEngine:
                 or self.event_rebouce_ts is not None
                 or self.tocou_rede
             )
-
-            if side_origin is None or side_dest is None:
+            if lado_atacante is None or lado_fim is None:
                 resultado = "ERROR"
-            elif side_origin != side_dest:
+            elif lado_fim != lado_atacante:
+                # Invariance rule: attacker side != ending side.
                 resultado = "SPIKE"
-            elif impacto_rede_detectado and dist_rede_inicio <= self.net_proximity_threshold:
+            elif tocou_rede:
+                # Invariance rule for block: ends on attacker side and touched net.
                 resultado = "BLOCK"
             else:
                 resultado = "ERROR"
-
-            print(
-                f"[DECISION] Frames: {len(base_drawer)} | Lados Iguais: {same_side} | "
-                f"Distância: {dist_rede_inicio:.1f}px | Resultado: {resultado}."
-            )
-            return resultado, side_origin, side_dest, not same_side
+            print(f"[FINAL] Origem: {lado_atacante} | Fim: {lado_fim} | Rede: {tocou_rede} -> RESULTADO: {resultado}.")
+            print(f"[POSSE] Bola no {self.posse_atual} | Fim da Seta: {lado_fim}")
+            return resultado, lado_atacante, lado_fim, bool(lado_atacante != lado_fim)
         except Exception:
-            return "ERROR", None, end_side, False
+            return None
 
     def _post_mortem_block_from_drawer(self, tracker, timestamp_s: float) -> Tuple[bool, Optional[str], Optional[str]]:
         # Post-mortem over the full global drawer (last 50 detections).
@@ -1092,9 +1368,11 @@ class AnalyticsEngine:
         Stats are only recorded when OCR confirms a score change.
         """
         self.point_finalized = False
+        self.score_just_updated = False
         self._sync_ball_drawer(tracker)
 
         ball_px = (float(ball_state.pixel[0]), float(ball_state.pixel[1]))
+        self._update_ball_dead_state(ball_state, timestamp_s, frame.shape[0])
         side = self.current_side
         _, _, dist_to_net = self._line_projection(ball_px, tracker)
         (net_x1, net_y1), (net_x2, net_y2) = tracker.net_line
@@ -1141,16 +1419,41 @@ class AnalyticsEngine:
             (255, 255, 0),
             2,
         )
+        posse_txt = "Posse: --"
+        posse_side = self.campo_posse_atual if self.campo_posse_atual in ("CampoA", "CampoB") else self.current_possession
+        if posse_side == "CampoA":
+            posse_txt = "Posse: Equipa A"
+        elif posse_side == "CampoB":
+            posse_txt = "Posse: Equipa B"
+        cv2.putText(
+            frame,
+            posse_txt,
+            (20, 84),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            (0, 255, 0),
+            2,
+        )
 
         # 1) Side tracking (for block memory, a single frame in Campo B is enough).
         if ball_state.visible:
+            prev_side_before_frame = self.current_side
             side = self._side_from_ball(ball_px, tracker)
+            tracker_possession = getattr(tracker, "posse_atual", None)
+            if tracker_possession not in ("CampoA", "CampoB"):
+                tracker_possession = getattr(tracker, "campo_posse_atual", None)
+            if tracker_possession not in ("CampoA", "CampoB"):
+                tracker_possession = getattr(tracker, "current_possession", None)
+            if tracker_possession in ("CampoA", "CampoB"):
+                self.current_possession = tracker_possession
+                self.campo_posse_atual = tracker_possession
+                self.posse_atual = tracker_possession
             if side is not None and self.attacking_side is None:
                 self.attacking_side = side
                 self.attacking_team = self._team_for_side(side)
 
-            # 1) Determine attacking side by exclusion from serving side at point start.
-            if not self.point_started:
+            # Service detection must happen once per point.
+            if not self.point_started and not self.service_detection_locked:
                 inferred_service_side = side if side is not None else self.current_side
                 if inferred_service_side is not None:
                     self._reset_for_new_service(
@@ -1160,9 +1463,29 @@ class AnalyticsEngine:
                     )
                     self.serving_side = inferred_service_side
                     self.last_service_side = inferred_service_side
+                    self.current_possession = inferred_service_side
+                    self.campo_posse_atual = inferred_service_side
+                    self.posse_atual = inferred_service_side
+                    self.last_attacker_before_net = inferred_service_side
                     self.point_started = True
+                    self.rally_closed_by_scoreboard = False
 
             self._update_possession(side, timestamp_s)
+            if side in ("CampoA", "CampoB"):
+                transition_happened = bool(
+                    dist_to_net <= self.net_touch_tolerance_px
+                    or in_block_zone
+                    or (
+                        prev_side_before_frame in ("CampoA", "CampoB")
+                        and side in ("CampoA", "CampoB")
+                        and side != prev_side_before_frame
+                    )
+                )
+                if transition_happened:
+                    attacker_candidate = self.posse_atual if self.posse_atual in ("CampoA", "CampoB") else prev_side_before_frame
+                    if attacker_candidate in ("CampoA", "CampoB"):
+                        self.last_attacker_before_net = attacker_candidate
+            self.last_ball_seen_ts = float(timestamp_s)
             if side == "CampoB":
                 self.last_seen_side_b_time = timestamp_s
 
@@ -1211,38 +1534,114 @@ class AnalyticsEngine:
         self.prev_ball_visible = bool(ball_state.visible)
         self.prev_visible_in_block_zone = in_block_zone
 
-        if frame_idx % config.ocr_every_n_frames == 0:
-            score = self.ocr.read(frame)
-            if self.prev_score is None and score is not None:
-                self.prev_score = score
-            elif score is not None and self.prev_score is not None and score != self.prev_score:
-                if self.pending_score_change is None or self.pending_score_change != score:
-                    self.pending_score_change = score
+        if frame_idx % config.ocr_every_n_frames == 0 and self.pending_score_change is None:
+            score_stable = self.ocr.read(frame)
+            score_raw = getattr(self.ocr, "last_raw_score", None)
+            self.last_ocr_score_stable = score_stable
+            self.last_ocr_score_raw = score_raw
+
+            score = score_stable
+            # Score-first closure: if stable OCR lags, use raw changed reading.
+            if self.prev_score is not None:
+                if (score is None or score == self.prev_score) and score_raw is not None and score_raw != self.prev_score:
+                    score = score_raw
+
+            if score is not None and self.valor_bloqueado_ocr is not None:
+                if score == self.valor_bloqueado_ocr:
+                    print(f"[OCR-LOCKED] Mantendo placar forçado e ignorando leitura errada repetida: {score}.")
+                    score = None
+                else:
+                    self._clear_ocr_block_value(announce=False)
+
+            if score is not None and self.valor_recuperacao_ocr is not None:
+                if self.prev_score is not None and score == self.prev_score:
+                    # OCR caught up to the current reference score.
+                    self.valor_recuperacao_ocr = None
+                elif score == self.valor_recuperacao_ocr:
+                    print(f"[OCR-RECOVERY] Ignorando leitura transitória antiga: {score}.")
+                    score = None
+
+            if self.prev_score is None:
+                if score is not None:
+                    self.prev_score = score
+                elif score_raw is not None:
+                    self.prev_score = score_raw
+            elif score is not None and score != self.prev_score:
+                accepted_score = None
+                forced_by_error = False
+
+                if self._is_logical_score_change(self.prev_score, score):
+                    accepted_score = score
+                else:
+                    inferred_score = self._infer_forced_score_from_invalid_read(self.prev_score, score)
+                    if inferred_score is not None:
+                        accepted_score = inferred_score
+                        forced_by_error = True
+                        self._set_ocr_block_value(score, timestamp_s)
+                        print(
+                            f"[OCR-FIX] Leitura impossível {score}. "
+                            f"Forçando mapeamento +1 para {accepted_score} e ativando OCR-LOCK."
+                        )
+                    else:
+                        guessed_score = self._infer_plus_one_from_dubious_read(self.prev_score, score)
+                        if guessed_score is not None:
+                            accepted_score = guessed_score
+                            forced_by_error = True
+                            self._set_ocr_block_value(score, timestamp_s)
+                            print(
+                                f"[OCR-GUESS] Leitura duvidosa {score}. "
+                                f"Assumindo progressão +1 para {accepted_score}."
+                            )
+                        else:
+                            fallback_team = None
+                            if self.last_attacker_before_net in ("CampoA", "CampoB"):
+                                fallback_team = self._team_for_side(self.last_attacker_before_net)
+                            elif self.posse_atual in ("CampoA", "CampoB"):
+                                fallback_team = self._team_for_side(self.posse_atual)
+                            if fallback_team is None:
+                                fallback_team = "TeamA"
+                            accepted_score = self._score_plus_one(self.prev_score, fallback_team)
+                            forced_by_error = True
+                            self._set_ocr_block_value(score, timestamp_s)
+                            print(
+                                f"[OCR-GUESS] Mudança detetada mas leitura instável ({score}). "
+                                f"A forçar {accepted_score} para não bloquear o fecho do rally."
+                            )
+
+                if accepted_score is not None:
+                    print(f"[OCR-VALID] Mudança +1 confirmada: {self.prev_score} -> {accepted_score}.")
+                    if forced_by_error:
+                        # After forced +1, ignore temporary fallback to previous scoreboard value.
+                        self.valor_recuperacao_ocr = self.prev_score
+                    else:
+                        self.valor_recuperacao_ocr = None
+                    self.pending_score_prev_base = self.prev_score
+                    self.pending_score_change = accepted_score
                     self.pending_score_change_ts = timestamp_s
                     self.pending_score_drawer_snapshot = self._ordered_ball_drawer()
+                    self.pending_score_forced = forced_by_error
+                    self.invalid_ocr_candidate = None
+                    self.tentativas_ocr = 0
+                else:
+                    print(f"[OCR-REJECT] Mudança inválida: {self.prev_score} -> {score}.")
+                    self.invalid_ocr_candidate = score
+                    self.tentativas_ocr = 0
 
         rally_finished = False
         point_label = None
-
-        min_dist = min_distance_ball_players(ball_state.pixel, players)
-        contact_players = min_dist < 45
 
         if self.pending_score_change is not None:
             if self.rally_mgr.active is None:
                 self.rally_mgr.start_if_needed(True, timestamp_s, frame_idx, tracker.trail_points())
 
-            if self.pending_score_change_ts is None:
-                self.pending_score_change_ts = timestamp_s
             analysis_drawer = self._ordered_drawer_copy(self.pending_score_drawer_snapshot)
             if not analysis_drawer:
                 analysis_drawer = self._ordered_ball_drawer()
 
-            if len(analysis_drawer) <= 1 and (timestamp_s - self.pending_score_change_ts) < self.post_mortem_wait_s:
-                return rally_finished, point_label
-
-            time.sleep(0.001)
-
-            winner = self._winner_from_score_change(self.pending_score_change)
+            winner = self._winner_from_score_change(
+                self.pending_score_change,
+                prev_score=self.pending_score_prev_base,
+            )
             drawer_start, drawer_end = self._drawer_time_bounds(
                 fallback_x=float(ball_px[0]),
                 fallback_y=float(ball_px[1]),
@@ -1252,55 +1651,88 @@ class AnalyticsEngine:
             x_inicio = float(drawer_start[0])
             lado_origem = self._side_from_x_position(x_inicio, tracker)
 
-            # Keep attacker side/team synchronized with trajectory origin.
-            self.attacking_side = lado_origem
-            equipe_atacante_real = self._team_for_side(lado_origem) if lado_origem is not None else "Unknown"
-            if equipe_atacante_real != "Unknown":
-                self.attacking_team = equipe_atacante_real
-
-            decision_result, lado_origem_pm, lado_destino_pm, _crossed_pm = self.check_post_mortem(
-                tracker=tracker,
-                end_side=None,
-                drawer=analysis_drawer,
+            print(
+                f"[STAS-VALID] Placar mudou. Frames na gaveta: {len(analysis_drawer)}. "
+                "Contando rali e verificando estatística técnica..."
             )
-            resultado = decision_result
-            if lado_origem_pm is not None:
-                lado_origem = lado_origem_pm
-            ptype = "OPPONENT_ERROR"
-            if resultado == "BLOCK":
-                ptype = "POINT_BY_BLOCK"
-            elif resultado == "SPIKE":
-                ptype = "POINT_BY_SPIKE"
+            inconclusivo = True
+            resultado = "RALLY_ONLY"
+            ptype = "RALLY_ONLY"
+            if len(analysis_drawer) < self.min_frames_for_technical_stats:
+                print("[INFO] Rali contabilizado por placar, mas com <8 frames: sem classificação técnica.")
             else:
-                ptype = "OPPONENT_ERROR"
+                attacker_hint = self.last_attacker_before_net
+                if attacker_hint not in ("CampoA", "CampoB"):
+                    tracker_attacker = getattr(tracker, "attacking_side", None)
+                    attacker_hint = tracker_attacker if tracker_attacker in ("CampoA", "CampoB") else self.campo_posse_atual
+                pm = self.check_post_mortem(
+                    tracker=tracker,
+                    end_side=None,
+                    drawer=analysis_drawer,
+                    attacker_side=attacker_hint,
+                )
+                if pm is not None:
+                    decision_result, lado_origem_pm, _lado_destino_pm, _crossed_pm = pm
+                    if lado_origem_pm is not None:
+                        lado_origem = lado_origem_pm
+                    if decision_result == "BLOCK":
+                        inconclusivo = False
+                        resultado = "BLOCK"
+                        ptype = "POINT_BY_BLOCK"
+                    elif decision_result == "SPIKE":
+                        inconclusivo = False
+                        resultado = "SPIKE"
+                        ptype = "POINT_BY_SPIKE"
+
+            winner_effective = winner
+            if winner_effective == "Unknown":
+                if lado_origem in ("CampoA", "CampoB"):
+                    if resultado == "BLOCK":
+                        winner_effective = self._team_for_side(self._other_side(lado_origem))
+                    elif resultado == "SPIKE":
+                        winner_effective = self._team_for_side(lado_origem)
+                elif self.posse_atual in ("CampoA", "CampoB"):
+                    winner_effective = self._team_for_side(self.posse_atual)
+
+            final_score = self.pending_score_change
 
             self.point_finalized = True
-            ptype = self.update_stats(baseline_ptype=ptype, winner=winner, timestamp_s=timestamp_s)
+            ptype = self.update_stats(baseline_ptype=ptype, winner=winner_effective, timestamp_s=timestamp_s)
 
-            self.prev_score = self.pending_score_change
+            if final_score is not None:
+                self.prev_score = final_score
+                self.ocr.stable_score = final_score
+                self.score_just_updated = True
             self.pending_score_change = None
             self.pending_score_change_ts = None
             self.pending_score_drawer_snapshot = None
+            self.pending_score_prev_base = None
+            self.pending_score_forced = False
+            self.invalid_ocr_candidate = None
+            self.tentativas_ocr = 0
+            self.last_point_time = float(timestamp_s)
             self.rally_counter += 1
+            self.counts["Rallies"] += 1
+            self.rally_closed_by_scoreboard = True
 
             self.rally_mgr.end(
                 ts=timestamp_s,
                 frame_idx=frame_idx,
-                winner=winner,
-                ptype=resultado,
+                winner=winner_effective,
+                ptype="RALLY_ONLY" if inconclusivo else resultado,
                 max_speed=tracker._instant_speed(),
                 impact=ball_state.court,
                 reason="score_change",
             )
-            if self.point_finalized:
+            if inconclusivo:
+                print("[FINAL] Rali terminado, mas trajetória inconclusiva. Apenas +1 no contador de ralis.")
+            elif self.point_finalized:
                 if resultado == "SPIKE":
                     self.counts["Spikes"] += 1
                     self.counts["POINT_BY_SPIKE"] += 1
                 elif resultado == "BLOCK":
                     self.counts["Blocks"] += 1
                     self.counts["POINT_BY_BLOCK"] += 1
-                elif resultado == "ERROR":
-                    self.counts["OPPONENT_ERROR"] += 1
 
             # End-of-rally cleanup for next possession/event cycle (hard reset).
             self._reset_for_new_service(tracker, source="OCR")
@@ -1318,7 +1750,7 @@ class AnalyticsEngine:
             self.serving_side = None
 
             rally_finished = True
-            point_label = resultado
+            point_label = "RALLY_ONLY" if inconclusivo else resultado
 
         return rally_finished, point_label
 

@@ -102,6 +102,10 @@ class VolleyballTracker:
         self.side_confirm_frames: int = 5
         self.current_ball_side: Optional[str] = None
         self.side_streak_frames: int = 0
+        self.possession_confirm_frames: int = 3
+        self.current_possession: Optional[str] = None
+        self.campo_posse_atual: Optional[str] = None
+        self.posse_atual: Optional[str] = None
         self.attacking_side: Optional[str] = None
         self.tocou_rede: bool = False
         self.last_ball_detected = False
@@ -207,7 +211,6 @@ class VolleyballTracker:
 
         if ball_candidates:
             ball_det = max(ball_candidates, key=lambda b: b["conf"])
-            self.update_possession((float(ball_det["center"][0]), float(ball_det["center"][1])))
             now_t = float(time.time())
             self._infill_ball_drawer_gap_if_needed(float(ball_det["center"][0]), float(ball_det["center"][1]), now_t)
             self._append_ball_drawer(float(ball_det["center"][0]), float(ball_det["center"][1]), now_t)
@@ -247,6 +250,9 @@ class VolleyballTracker:
                 self.ball_drawer_hold_until_ts = float(timestamp_s) + self.ball_drawer_hold_s
 
         self.trail.append((int(x), int(y)))
+        if abs(float(x)) > 1e-6 or abs(float(y)) > 1e-6:
+            # Dynamic possession must be tracked on every frame, including short occlusions.
+            self.update_possession((float(x), float(y)))
         speed_px = self._instant_speed()
         court_xy = pixel_to_court(self.H, (x, y))
         vx, vy = self._last_velocity()
@@ -349,6 +355,7 @@ class VolleyballTracker:
         self.clear_ball_drawer()
         self.current_ball_side = None
         self.side_streak_frames = 0
+        # Keep global possession across service resets.
         self.attacking_side = None
         self.pending_net_occlusion = None
         if abs(float(x)) < 1e-6 and abs(float(y)) < 1e-6:
@@ -519,21 +526,37 @@ class VolleyballTracker:
         if side is None:
             return self.attacking_side
 
+        previous_side = self.current_ball_side
         if self.current_ball_side is None:
             self.current_ball_side = side
             self.side_streak_frames = 1
         elif side == self.current_ball_side:
             self.side_streak_frames += 1
         else:
+            # Attacker is the side with possession immediately before field change.
+            pre_change_attacker = self.posse_atual if self.posse_atual in ("CampoA", "CampoB") else self.current_ball_side
+            if pre_change_attacker in ("CampoA", "CampoB"):
+                self.attacking_side = pre_change_attacker
             # Do not reset drawer on net crossing; keep last 50 frames of full rally.
             self.current_ball_side = side
             self.side_streak_frames = 1
 
-        if self.side_streak_frames >= self.side_confirm_frames:
-            self.attacking_side = side
-        elif self.attacking_side is None:
-            # Ensure non-null attacker side after first touches.
-            self.attacking_side = side
+        if self.side_streak_frames > self.possession_confirm_frames:
+            self.current_possession = side
+            self.campo_posse_atual = side
+            self.posse_atual = side
+        elif self.current_possession is None:
+            self.current_possession = side
+            self.campo_posse_atual = side
+            self.posse_atual = side
+
+        # Attacker is frozen at net-intersection using last confirmed possession.
+        if self.ball_near_net(pixel_pt):
+            net_attacker = self.posse_atual if self.posse_atual in ("CampoA", "CampoB") else previous_side
+            if net_attacker in ("CampoA", "CampoB"):
+                self.attacking_side = net_attacker
+        elif self.attacking_side is None and self.posse_atual in ("CampoA", "CampoB"):
+            self.attacking_side = self.posse_atual
         return self.attacking_side
 
     def _signed_side(self, pixel_pt: Tuple[float, float]) -> float:
