@@ -28,15 +28,21 @@ class Config:
     # Detection thresholds
     conf_thresh: float = 0.25
     iou_thresh: float = 0.45
+    ball_conf_high: float = 0.35
+    ball_conf_low: float = 0.15
+    kalman_gate_px: float = 60.0
 
     # Tracking / analytics params
     max_trail: int = 60
     spike_speed_thresh: float = 14.0  # pixels / frame
+    spike_speed_threshold_px: float = 8.0  # threshold for SPIKE vs FREEBALL
     block_speed_inversion_ratio: float = -0.6
     spike_dir_change_cos: float = -0.35  # inversao de direcao para spike
     ace_max_duration_s: float = 3.0
     net_band_height_px: int = 25  # tolerance when checking ball near net
     net_line_tolerance_px: int = 80  # distancia max ao segmento da rede para block
+    net_buffer_px: int = 15  # neutral zone around net where side should not flip
+    net_cross_confirm_frames: int = 3
     zone_block_half_width_px: int = 100  # margem horizontal da caixa de impacto da rede (+40px de antecipacao)
     zone_block_below_px: int = 20  # ZONE_BLOCK começa 20px abaixo da fita da rede
     zone_block_above_px: int = 100  # ZONE_BLOCK estende 100px acima da fita da rede
@@ -46,7 +52,8 @@ class Config:
     block_occlusion_max_frames: int = 12  # frames maximos para fechar evento por oclusao
     block_event_ttl_s: float = 3.0  # tempo maximo para associar evento da rede ao ponto OCR
     block_event_cooldown_frames: int = 6  # evita duplicar bloco em frames consecutivos
-    ball_max_area_px: int = 2200  # area maxima aceitavel da bbox da bola
+    ball_min_area_px: int = 10  # area minima aceitavel da bbox da bola
+    ball_max_area_px: int = 2000  # area maxima aceitavel da bbox da bola
     ball_max_age_frames: int = 30  # manter ID da bola se desaparecer (frames)
     court_margin_m: float = 0.35  # tolerancia na conversao pixel->campo
 

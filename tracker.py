@@ -99,6 +99,12 @@ class VolleyballTracker:
         self.ball_drawer_clear_after_ts: Optional[float] = None
         self.ball_drawer_outlier_px: float = 220.0
         self.ball_drawer_outlier_bridge_px: float = 180.0
+        self.ball_conf_high: float = float(getattr(config, "ball_conf_high", 0.35))
+        self.ball_conf_low: float = float(getattr(config, "ball_conf_low", 0.15))
+        self.kalman_gate_px: float = float(getattr(config, "kalman_gate_px", 60.0))
+        self.ball_min_area_px: float = float(getattr(config, "ball_min_area_px", 10.0))
+        self.ball_max_area_px: float = float(getattr(config, "ball_max_area_px", 2000.0))
+        self.net_buffer_px: float = float(getattr(config, "net_buffer_px", 15.0))
         self.side_confirm_frames: int = 5
         self.current_ball_side: Optional[str] = None
         self.side_streak_frames: int = 0
@@ -166,7 +172,7 @@ class VolleyballTracker:
             source=frame,
             stream=False,
             persist=True,
-            conf=0.15,
+            conf=self.ball_conf_low,
             iou=config.iou_thresh,
             imgsz=1280,
             vid_stride=1,
@@ -181,6 +187,7 @@ class VolleyballTracker:
         players: List[Dict] = []
         ball_det: Optional[Dict] = None
         ball_candidates: List[Dict] = []
+        pred_center = self._kalman_predicted_center()
         for box in res.boxes:
             cls = int(box.cls)
             x1, y1, x2, y2 = box.xyxy[0].tolist()
@@ -189,9 +196,10 @@ class VolleyballTracker:
             if self._is_person_detection(cls, res) and float(box.conf) >= 0.40:
                 tid = int(box.id.item()) if box.id is not None else -1
                 players.append({"id": tid, "bbox": (x1, y1, x2, y2), "conf": float(box.conf)})
-            elif self._is_ball_detection(cls, res) and float(box.conf) >= 0.15:
+            elif self._is_ball_detection(cls, res):
+                conf = float(box.conf)
                 area = (x2 - x1) * (y2 - y1)
-                if area > config.ball_max_area_px:
+                if area < self.ball_min_area_px or area > self.ball_max_area_px:
                     continue
                 if abs(float(cx)) < 1e-6 and abs(float(cy)) < 1e-6:
                     continue
@@ -200,17 +208,28 @@ class VolleyballTracker:
                     continue
                 if not self._inside_field_roi((float(cx), float(cy))):
                     continue
+                if pred_center is not None:
+                    dist_to_pred = float(np.hypot(float(cx) - pred_center[0], float(cy) - pred_center[1]))
+                else:
+                    dist_to_pred = 1e9
+                accepted = bool(
+                    conf >= self.ball_conf_high
+                    or (conf >= self.ball_conf_low and dist_to_pred < self.kalman_gate_px)
+                )
+                if not accepted:
+                    continue
                 det = {
                     "bbox": (x1, y1, x2, y2),
                     "center": (cx, cy),
-                    "conf": float(box.conf),
+                    "conf": conf,
                     "area": area,
+                    "dist_kalman": dist_to_pred,
                     "visible": True,
                 }
                 ball_candidates.append(det)
 
         if ball_candidates:
-            ball_det = max(ball_candidates, key=lambda b: b["conf"])
+            ball_det = min(ball_candidates, key=lambda b: (float(b.get("dist_kalman", 1e9)), -float(b.get("conf", 0.0))))
             now_t = float(time.time())
             self._infill_ball_drawer_gap_if_needed(float(ball_det["center"][0]), float(ball_det["center"][1]), now_t)
             self._append_ball_drawer(float(ball_det["center"][0]), float(ball_det["center"][1]), now_t)
@@ -287,6 +306,23 @@ class VolleyballTracker:
             overflow = len(self.ball_drawer) - self.ball_drawer_maxlen
             del self.ball_drawer[:overflow]
         print(f"A adicionar à gaveta: {x}, {y}. Total agora: {len(self.ball_drawer)}")
+
+    def _kalman_predicted_center(self) -> Optional[Tuple[float, float]]:
+        if self.ball_kf.initialized:
+            try:
+                state = np.asarray(self.ball_kf.kf.statePost, dtype=np.float32).reshape(-1, 1)
+                trans = np.asarray(self.ball_kf.kf.transitionMatrix, dtype=np.float32)
+                pred = trans @ state
+                return float(pred[0]), float(pred[1])
+            except Exception:
+                pass
+        if self.ball_last_det is not None:
+            c = self.ball_last_det.get("center")
+            if c is not None:
+                return float(c[0]), float(c[1])
+        if self.trail:
+            return float(self.trail[-1][0]), float(self.trail[-1][1])
+        return None
 
     def _infill_ball_drawer_gap_if_needed(self, x: float, y: float, t: float) -> None:
         if not self.ball_drawer:
@@ -522,6 +558,10 @@ class VolleyballTracker:
         return "CampoA" if s > 0 else "CampoB"
 
     def update_possession(self, pixel_pt: Tuple[float, float]) -> Optional[str]:
+        if self._dist_to_net_line(pixel_pt) < self.net_buffer_px:
+            # Neutral zone near net: keep last confirmed possession.
+            return self.attacking_side
+
         side = self._side_from_pixel(pixel_pt)
         if side is None:
             return self.attacking_side

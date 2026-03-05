@@ -174,13 +174,21 @@ class ScoreboardOCR:
 # -------------------------- RALLY STATE -----------------------------
 @dataclass
 class Rally:
+    id: int
     rally_id: int
     start_ts: float
     start_frame: int
     end_ts: Optional[float] = None
     end_frame: Optional[int] = None
+    duration: float = 0.0
+    attacker: Optional[str] = None
     winner_team: Optional[str] = None
     point_type: Optional[str] = None
+    net_crossings: int = 0
+    ball_speed_max: float = 0.0
+    ball_speed_mean: float = 0.0
+    trajectory: List[Tuple[int, float, float]] = field(default_factory=list)
+    # Backward compatibility fields
     max_speed_px: float = 0.0
     ball_trail: List[Tuple[int, int]] = field(default_factory=list)
     impact_point: Optional[Tuple[float, float]] = None  # court coords
@@ -195,16 +203,42 @@ class RallyManager:
 
     def start_if_needed(self, condition: bool, ts: float, frame_idx: int, trail: List[Tuple[int, int]]):
         if condition and self.active is None:
-            self.active = Rally(rally_id=self.next_id, start_ts=ts, start_frame=frame_idx, ball_trail=list(trail))
+            self.active = Rally(
+                id=self.next_id,
+                rally_id=self.next_id,
+                start_ts=ts,
+                start_frame=frame_idx,
+                ball_trail=list(trail),
+            )
             self.next_id += 1
 
-    def end(self, ts: float, frame_idx: int, winner: str, ptype: str, max_speed: float, impact: Optional[Tuple[float, float]], reason: str):
+    def end(
+        self,
+        ts: float,
+        frame_idx: int,
+        winner: str,
+        ptype: str,
+        max_speed: float,
+        impact: Optional[Tuple[float, float]],
+        reason: str,
+        attacker: Optional[str] = None,
+        net_crossings: int = 0,
+        ball_speed_mean: float = 0.0,
+        trajectory: Optional[List[Tuple[int, float, float]]] = None,
+    ):
         if self.active is None:
             return
         self.active.end_ts = ts
         self.active.end_frame = frame_idx
+        self.active.duration = max(0.0, float(ts - self.active.start_ts))
+        self.active.attacker = attacker
         self.active.winner_team = winner
         self.active.point_type = ptype
+        self.active.net_crossings = int(net_crossings)
+        self.active.ball_speed_max = float(max_speed)
+        self.active.ball_speed_mean = float(ball_speed_mean)
+        self.active.trajectory = list(trajectory) if trajectory is not None else []
+        # Backward compatibility aliases
         self.active.max_speed_px = max_speed
         self.active.impact_point = impact
         self.active.ended_reason = reason
@@ -222,9 +256,13 @@ class RallyManager:
                     "start_timestamp": r.start_ts,
                     "end_timestamp": r.end_ts,
                     "duration": r.end_ts - r.start_ts,
+                    "rally_duration": r.duration if r.duration > 0 else (r.end_ts - r.start_ts),
+                    "attacker": r.attacker,
                     "type_of_point": r.point_type,
                     "winner_team": r.winner_team,
-                    "ball_speed_max": r.max_speed_px,
+                    "net_crossings": r.net_crossings,
+                    "ball_speed_mean": r.ball_speed_mean,
+                    "ball_speed_max": r.ball_speed_max if r.ball_speed_max > 0 else r.max_speed_px,
                 }
             )
         return pd.DataFrame(rows)
@@ -286,12 +324,13 @@ def draw_sidebar(frame, rally_mgr: RallyManager, counts: Dict[str, int], rally_c
     panel_w = 240
     x0 = w - panel_w - pad
     y0 = pad
-    cv2.rectangle(frame, (x0, y0), (x0 + panel_w, y0 + 205), (0, 0, 0), -1)
+    cv2.rectangle(frame, (x0, y0), (x0 + panel_w, y0 + 235), (0, 0, 0), -1)
     cv2.putText(frame, "Stats", (x0 + 10, y0 + 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
     lines = [
         f"Aces: {counts.get('ACE', 0)}",
         f"Spikes: {counts.get('Spikes', counts.get('POINT_BY_SPIKE', 0))}",
         f"Blocks: {counts.get('Blocks', counts.get('POINT_BY_BLOCK', 0))}",
+        f"Freeballs: {counts.get('Freeballs', counts.get('FREEBALL', 0))}",
         f"Bolas na Rede: {counts.get('Bolas na Rede', counts.get('BOLA_NA_REDE', 0))}",
         f"Errors: {counts.get('OPPONENT_ERROR', 0)}",
         f"Rallies: {rally_count}",
@@ -309,10 +348,12 @@ class AnalyticsEngine:
             "ACE": 0,
             "POINT_BY_SPIKE": 0,
             "POINT_BY_BLOCK": 0,
+            "FREEBALL": 0,
             "BOLA_NA_REDE": 0,
             "OPPONENT_ERROR": 0,
             "Spikes": 0,
             "Blocks": 0,
+            "Freeballs": 0,
             "Bolas na Rede": 0,
             "Rallies": 0,
         }
@@ -326,13 +367,18 @@ class AnalyticsEngine:
         self.valor_bloqueado_ocr: Optional[Tuple[int, int, int, int]] = None
         self.valor_recuperacao_ocr: Optional[Tuple[int, int, int, int]] = None
         self.valor_bloqueado_ocr_until: float = -1e9
+        self.high_jump_candidate: Optional[Tuple[int, int, int, int]] = None
+        self.high_jump_count: int = 0
+        self.high_jump_min_persist: int = 3
         self.tentativas_ocr: int = 0
         self.last_point_time: float = -1e9
+        self.last_point_frame: int = -1_000_000
+        self.min_frames_between_points: int = 30
         self.point_cooldown_s: float = 10.0
         self.ocr_blocked_until: float = -1e9
         self.ocr_stabilization_lock_s: float = 5.0
         self.ball_dead_confirm_s: float = 1.0
-        self.min_frames_for_technical_stats: int = 8
+        self.min_frames_for_technical_stats: int = 5
         self.ball_missing_since: Optional[float] = None
         self.ball_ground_stable_since: Optional[float] = None
         self.last_ground_y: Optional[float] = None
@@ -403,6 +449,19 @@ class AnalyticsEngine:
         self.last_streak_side: Optional[str] = None
         self.possession_side_5frames: Optional[str] = None
         self.rally_closed_by_scoreboard: bool = True
+        self.net_buffer_px: float = float(getattr(config, "net_buffer_px", 15.0))
+        self.net_cross_confirm_frames: int = int(getattr(config, "net_cross_confirm_frames", 3))
+        self.spike_speed_threshold_px: float = float(getattr(config, "spike_speed_threshold_px", 8.0))
+        self.current_rally_trajectory: List[Tuple[int, float, float]] = []
+        self.rally_crossings: int = 0
+        self.crossing_candidate_side: Optional[str] = None
+        self.crossing_candidate_frames: int = 0
+        self.crossing_confirmed_side: Optional[str] = None
+        self.RALLY_STATE_ACTIVE: str = "ACTIVE"
+        self.RALLY_ENDED_VISUAL: str = "RALLY_ENDED_VISUAL"
+        self.RALLY_CONFIRMED_OCR: str = "RALLY_CONFIRMED_OCR"
+        self.visual_end_state: str = self.RALLY_STATE_ACTIVE
+        self.visual_end_since_ts: Optional[float] = None
 
         # 3) Kalman bridge: keep ball track alive through brief net occlusions.
         config.ball_max_age_frames = 15
@@ -475,6 +534,66 @@ class AnalyticsEngine:
         d_a = new_a_pts - prev_a_pts
         d_b = new_b_pts - prev_b_pts
         return (d_a == 1 and d_b == 0) or (d_a == 0 and d_b == 1)
+
+    def _is_score_lower_than_current(
+        self,
+        prev_score: Optional[Tuple[int, int, int, int]],
+        new_score: Optional[Tuple[int, int, int, int]],
+    ) -> bool:
+        if prev_score is None or new_score is None:
+            return False
+        return bool(
+            new_score[0] < prev_score[0]
+            or new_score[2] < prev_score[2]
+            or new_score[1] < prev_score[1]
+            or new_score[3] < prev_score[3]
+        )
+
+    def _is_score_jump_above_plus_one(
+        self,
+        prev_score: Optional[Tuple[int, int, int, int]],
+        new_score: Optional[Tuple[int, int, int, int]],
+    ) -> bool:
+        if prev_score is None or new_score is None:
+            return False
+        if self._is_logical_score_change(prev_score, new_score):
+            return False
+        # Any non-lower and non-equal transition is considered a jump/noisy progression.
+        if new_score == prev_score:
+            return False
+        if self._is_score_lower_than_current(prev_score, new_score):
+            return False
+        return True
+
+    def _partial_plus_one_score_update(
+        self,
+        prev_score: Optional[Tuple[int, int, int, int]],
+        ocr_score: Optional[Tuple[int, int, int, int]],
+    ) -> Optional[Tuple[int, int, int, int]]:
+        """
+        Accept side-wise +1 updates when OCR partially misreads the opposite side.
+        Example: official (0,5,0,2), OCR (0,6,0,0) -> accept (0,6,0,2).
+        """
+        if prev_score is None or ocr_score is None:
+            return None
+        if ocr_score == prev_score:
+            return None
+
+        prev_a_set, prev_a_pts, prev_b_set, prev_b_pts = prev_score
+        _ocr_a_set, ocr_a_pts, _ocr_b_set, ocr_b_pts = ocr_score
+
+        team_a_plus_one = int(ocr_a_pts) == int(prev_a_pts) + 1
+        team_b_plus_one = int(ocr_b_pts) == int(prev_b_pts) + 1
+
+        # Volleyball point progression should only increment one side at a time.
+        if team_a_plus_one and team_b_plus_one:
+            return None
+        if not team_a_plus_one and not team_b_plus_one:
+            return None
+
+        new_a_pts = int(prev_a_pts) + (1 if team_a_plus_one else 0)
+        new_b_pts = int(prev_b_pts) + (1 if team_b_plus_one else 0)
+        return (int(prev_a_set), int(new_a_pts), int(prev_b_set), int(new_b_pts))
 
     def _team_for_side(self, side: str) -> str:
         return "TeamA" if side == "CampoA" else "TeamB"
@@ -638,6 +757,65 @@ class AnalyticsEngine:
         dist = float(np.hypot(ball_px[0] - proj_x, ball_px[1] - proj_y))
         return float(proj_x), float(proj_y), dist
 
+    def _side_from_ball_with_net_zone(self, ball_px: Tuple[float, float], tracker) -> Tuple[Optional[str], bool]:
+        side = self._side_from_ball(ball_px, tracker)
+        _px, _py, dist_to_net = self._line_projection(ball_px, tracker)
+        in_net_zone = bool(dist_to_net < self.net_buffer_px)
+        if in_net_zone:
+            return None, True
+        return side, False
+
+    def _update_crossing_counter(self, side: Optional[str], in_net_zone: bool) -> None:
+        if side not in ("CampoA", "CampoB"):
+            return
+        if in_net_zone:
+            return
+        if self.crossing_confirmed_side is None:
+            self.crossing_confirmed_side = side
+            self.crossing_candidate_side = None
+            self.crossing_candidate_frames = 0
+            return
+        if side == self.crossing_confirmed_side:
+            self.crossing_candidate_side = None
+            self.crossing_candidate_frames = 0
+            return
+        if self.crossing_candidate_side == side:
+            self.crossing_candidate_frames += 1
+        else:
+            self.crossing_candidate_side = side
+            self.crossing_candidate_frames = 1
+        if self.crossing_candidate_frames >= self.net_cross_confirm_frames:
+            self.rally_crossings += 1
+            self.crossing_confirmed_side = side
+            self.crossing_candidate_side = None
+            self.crossing_candidate_frames = 0
+
+    def _speed_metrics_from_drawer(self, drawer: List[Tuple[float, float, float]]) -> Tuple[float, float]:
+        ordered = self._ordered_drawer_copy(drawer)
+        if len(ordered) < 2:
+            return 0.0, 0.0
+        speeds: List[float] = []
+        for i in range(1, len(ordered)):
+            x0, y0, _t0 = ordered[i - 1]
+            x1, y1, _t1 = ordered[i]
+            speeds.append(float(np.hypot(x1 - x0, y1 - y0)))
+        if not speeds:
+            return 0.0, 0.0
+        return float(max(speeds)), float(np.mean(speeds))
+
+    def _update_visual_rally_end_state(self, timestamp_s: float) -> None:
+        if not self.point_started and self.rally_mgr.active is None:
+            self.visual_end_state = self.RALLY_STATE_ACTIVE
+            self.visual_end_since_ts = None
+            return
+        if self._is_ball_dead(timestamp_s):
+            if self.visual_end_state == self.RALLY_STATE_ACTIVE:
+                self.visual_end_state = self.RALLY_ENDED_VISUAL
+                self.visual_end_since_ts = float(timestamp_s)
+        elif self.visual_end_state == self.RALLY_ENDED_VISUAL:
+            self.visual_end_state = self.RALLY_STATE_ACTIVE
+            self.visual_end_since_ts = None
+
     def _block_zone_rect(self, tracker) -> Tuple[int, int, int, int]:
         (x1, y1), (x2, y2) = tracker.net_line
         x_min = int(min(x1, x2) - self.net_zone_half_width_px)
@@ -786,8 +964,17 @@ class AnalyticsEngine:
         self.pending_score_prev_base = None
         self.pending_score_forced = False
         self.invalid_ocr_candidate = None
+        self.high_jump_candidate = None
+        self.high_jump_count = 0
         self.tentativas_ocr = 0
         self.attacking_side = None
+        self.current_rally_trajectory = []
+        self.rally_crossings = 0
+        self.crossing_candidate_side = None
+        self.crossing_candidate_frames = 0
+        self.crossing_confirmed_side = None
+        self.visual_end_state = self.RALLY_STATE_ACTIVE
+        self.visual_end_since_ts = None
         # Keep possession state persistent across resets; attacker-before-net is rally-scoped.
         self.last_attacker_before_net = None
         self.attacking_team = None
@@ -909,6 +1096,24 @@ class AnalyticsEngine:
             if lado_atacante not in ("CampoA", "CampoB"):
                 lado_atacante = side_start_drawer
 
+            sides_history: List[str] = []
+            for x, y, _t in base_drawer:
+                s, in_net_zone = self._side_from_ball_with_net_zone((float(x), float(y)), tracker)
+                if in_net_zone or s not in ("CampoA", "CampoB"):
+                    continue
+                sides_history.append(s)
+            crossed = False
+            if len(sides_history) >= 2:
+                prev_s = sides_history[0]
+                for s in sides_history[1:]:
+                    if s != prev_s:
+                        crossed = True
+                        break
+                    prev_s = s
+            if sides_history:
+                lado_fim = sides_history[-1]
+
+            peak_speed, _mean_speed = self._speed_metrics_from_drawer(base_drawer)
             tocou_rede = bool(
                 self._drawer_passed_zone_block(tracker, drawer=base_drawer)
                 or self.ball_in_zone_flag
@@ -920,17 +1125,20 @@ class AnalyticsEngine:
             )
             if lado_atacante is None or lado_fim is None:
                 resultado = "ERROR"
-            elif lado_fim != lado_atacante:
-                # Invariance rule: attacker side != ending side.
-                resultado = "SPIKE"
-            elif tocou_rede:
-                # Invariance rule for block: ends on attacker side and touched net.
+            elif tocou_rede and lado_fim == lado_atacante:
                 resultado = "BLOCK"
+            elif crossed and lado_fim != lado_atacante and peak_speed > self.spike_speed_threshold_px:
+                resultado = "SPIKE"
+            elif crossed and lado_fim != lado_atacante and peak_speed <= self.spike_speed_threshold_px:
+                resultado = "FREEBALL"
             else:
                 resultado = "ERROR"
-            print(f"[FINAL] Origem: {lado_atacante} | Fim: {lado_fim} | Rede: {tocou_rede} -> RESULTADO: {resultado}.")
+            print(
+                f"[FINAL] Origem: {lado_atacante} | Fim: {lado_fim} | Rede: {tocou_rede} | "
+                f"Cruzou: {crossed} | Vmax: {peak_speed:.2f} -> RESULTADO: {resultado}."
+            )
             print(f"[POSSE] Bola no {self.posse_atual} | Fim da Seta: {lado_fim}")
-            return resultado, lado_atacante, lado_fim, bool(lado_atacante != lado_fim)
+            return resultado, lado_atacante, lado_fim, bool(crossed)
         except Exception:
             return None
 
@@ -1373,6 +1581,7 @@ class AnalyticsEngine:
 
         ball_px = (float(ball_state.pixel[0]), float(ball_state.pixel[1]))
         self._update_ball_dead_state(ball_state, timestamp_s, frame.shape[0])
+        self._update_visual_rally_end_state(timestamp_s)
         side = self.current_side
         _, _, dist_to_net = self._line_projection(ball_px, tracker)
         (net_x1, net_y1), (net_x2, net_y2) = tracker.net_line
@@ -1438,7 +1647,12 @@ class AnalyticsEngine:
         # 1) Side tracking (for block memory, a single frame in Campo B is enough).
         if ball_state.visible:
             prev_side_before_frame = self.current_side
-            side = self._side_from_ball(ball_px, tracker)
+            side_detected, in_net_zone = self._side_from_ball_with_net_zone(ball_px, tracker)
+            self._update_crossing_counter(side_detected, in_net_zone)
+            if side_detected in ("CampoA", "CampoB"):
+                side = side_detected
+            else:
+                side = self.current_side
             tracker_possession = getattr(tracker, "posse_atual", None)
             if tracker_possession not in ("CampoA", "CampoB"):
                 tracker_possession = getattr(tracker, "campo_posse_atual", None)
@@ -1448,9 +1662,9 @@ class AnalyticsEngine:
                 self.current_possession = tracker_possession
                 self.campo_posse_atual = tracker_possession
                 self.posse_atual = tracker_possession
-            if side is not None and self.attacking_side is None:
-                self.attacking_side = side
-                self.attacking_team = self._team_for_side(side)
+            if side_detected in ("CampoA", "CampoB") and self.attacking_side is None:
+                self.attacking_side = side_detected
+                self.attacking_team = self._team_for_side(side_detected)
 
             # Service detection must happen once per point.
             if not self.point_started and not self.service_detection_locked:
@@ -1469,9 +1683,12 @@ class AnalyticsEngine:
                     self.last_attacker_before_net = inferred_service_side
                     self.point_started = True
                     self.rally_closed_by_scoreboard = False
+            if self.point_started and self.rally_mgr.active is None:
+                self.rally_mgr.start_if_needed(True, timestamp_s, frame_idx, tracker.trail_points())
 
-            self._update_possession(side, timestamp_s)
-            if side in ("CampoA", "CampoB"):
+            if not in_net_zone:
+                self._update_possession(side, timestamp_s)
+            if side in ("CampoA", "CampoB") and not in_net_zone:
                 transition_happened = bool(
                     dist_to_net <= self.net_touch_tolerance_px
                     or in_block_zone
@@ -1488,6 +1705,9 @@ class AnalyticsEngine:
             self.last_ball_seen_ts = float(timestamp_s)
             if side == "CampoB":
                 self.last_seen_side_b_time = timestamp_s
+            if self.point_started and abs(float(ball_px[0])) > 1e-6 and abs(float(ball_px[1])) > 1e-6:
+                if not self.current_rally_trajectory or self.current_rally_trajectory[-1][0] != int(frame_idx):
+                    self.current_rally_trajectory.append((int(frame_idx), float(ball_px[0]), float(ball_px[1])))
 
             if in_block_zone:
                 self.ball_in_zone_flag = True
@@ -1545,6 +1765,10 @@ class AnalyticsEngine:
             if self.prev_score is not None:
                 if (score is None or score == self.prev_score) and score_raw is not None and score_raw != self.prev_score:
                     score = score_raw
+                # Release OCR locks as soon as OCR aligns with official score.
+                if score_stable == self.prev_score or score_raw == self.prev_score:
+                    self._clear_ocr_block_value(announce=False)
+                    self.valor_recuperacao_ocr = None
 
             if score is not None and self.valor_bloqueado_ocr is not None:
                 if score == self.valor_bloqueado_ocr:
@@ -1566,66 +1790,79 @@ class AnalyticsEngine:
                     self.prev_score = score
                 elif score_raw is not None:
                     self.prev_score = score_raw
-            elif score is not None and score != self.prev_score:
-                accepted_score = None
-                forced_by_error = False
-
-                if self._is_logical_score_change(self.prev_score, score):
-                    accepted_score = score
+            elif score is not None:
+                # Release OCR lock once reading aligns with official score.
+                if score == self.prev_score:
+                    self._clear_ocr_block_value(announce=False)
+                    self.valor_recuperacao_ocr = None
+                    self.high_jump_candidate = None
+                    self.high_jump_count = 0
                 else:
-                    inferred_score = self._infer_forced_score_from_invalid_read(self.prev_score, score)
-                    if inferred_score is not None:
-                        accepted_score = inferred_score
-                        forced_by_error = True
-                        self._set_ocr_block_value(score, timestamp_s)
-                        print(
-                            f"[OCR-FIX] Leitura impossível {score}. "
-                            f"Forçando mapeamento +1 para {accepted_score} e ativando OCR-LOCK."
-                        )
+                    accepted_score: Optional[Tuple[int, int, int, int]] = None
+                    accepted_reason: Optional[str] = None
+                    if self._is_logical_score_change(self.prev_score, score):
+                        accepted_score = score
+                        accepted_reason = "strict+1"
                     else:
-                        guessed_score = self._infer_plus_one_from_dubious_read(self.prev_score, score)
-                        if guessed_score is not None:
-                            accepted_score = guessed_score
-                            forced_by_error = True
-                            self._set_ocr_block_value(score, timestamp_s)
+                        partial_score = self._partial_plus_one_score_update(self.prev_score, score)
+                        if partial_score is not None and self._is_logical_score_change(self.prev_score, partial_score):
+                            accepted_score = partial_score
+                            accepted_reason = "partial+1"
+
+                    if accepted_score is not None:
+                        # Temporal protection: avoid duplicate rally counting.
+                        if int(frame_idx - self.last_point_frame) < self.min_frames_between_points:
                             print(
-                                f"[OCR-GUESS] Leitura duvidosa {score}. "
-                                f"Assumindo progressão +1 para {accepted_score}."
+                                f"[OCR-REJECT] Mudança +1 ignorada por janela temporal "
+                                f"({frame_idx - self.last_point_frame} < {self.min_frames_between_points} frames)."
                             )
+                            self.high_jump_candidate = None
+                            self.high_jump_count = 0
                         else:
-                            fallback_team = None
-                            if self.last_attacker_before_net in ("CampoA", "CampoB"):
-                                fallback_team = self._team_for_side(self.last_attacker_before_net)
-                            elif self.posse_atual in ("CampoA", "CampoB"):
-                                fallback_team = self._team_for_side(self.posse_atual)
-                            if fallback_team is None:
-                                fallback_team = "TeamA"
-                            accepted_score = self._score_plus_one(self.prev_score, fallback_team)
-                            forced_by_error = True
-                            self._set_ocr_block_value(score, timestamp_s)
-                            print(
-                                f"[OCR-GUESS] Mudança detetada mas leitura instável ({score}). "
-                                f"A forçar {accepted_score} para não bloquear o fecho do rally."
-                            )
-
-                if accepted_score is not None:
-                    print(f"[OCR-VALID] Mudança +1 confirmada: {self.prev_score} -> {accepted_score}.")
-                    if forced_by_error:
-                        # After forced +1, ignore temporary fallback to previous scoreboard value.
-                        self.valor_recuperacao_ocr = self.prev_score
+                            if accepted_reason == "partial+1" and accepted_score != score:
+                                print(
+                                    f"[OCR-PARTIAL-VALID] OCR parcial aceite: leitura={score} "
+                                    f"-> oficial {self.prev_score} para {accepted_score}."
+                                )
+                            else:
+                                print(f"[OCR-VALID] Mudança +1 confirmada: {self.prev_score} -> {accepted_score}.")
+                            self.pending_score_prev_base = self.prev_score
+                            self.pending_score_change = accepted_score
+                            self.pending_score_change_ts = timestamp_s
+                            self.pending_score_drawer_snapshot = self._ordered_ball_drawer()
+                            self.pending_score_forced = False
+                            self.invalid_ocr_candidate = None
+                            self.tentativas_ocr = 0
+                            self.high_jump_candidate = None
+                            self.high_jump_count = 0
+                    elif self._is_score_lower_than_current(self.prev_score, score):
+                        # OCR regression (e.g., reading 4 while official is 5): ignore noise.
+                        print(f"[OCR-NOISE] Leitura inferior ignorada: oficial={self.prev_score} OCR={score}.")
+                        self.high_jump_candidate = None
+                        self.high_jump_count = 0
+                    elif self._is_score_jump_above_plus_one(self.prev_score, score):
+                        # Ignore jumps unless persistent, then resync scoreboard (no rally event).
+                        if self.high_jump_candidate == score:
+                            self.high_jump_count += 1
+                        else:
+                            self.high_jump_candidate = score
+                            self.high_jump_count = 1
+                        print(
+                            f"[OCR-JUMP] Leitura >+1 detetada: {self.prev_score} -> {score} "
+                            f"(persistência {self.high_jump_count}/{self.high_jump_min_persist})."
+                        )
+                        if self.high_jump_count >= self.high_jump_min_persist:
+                            self.prev_score = score
+                            self.ocr.stable_score = score
+                            self._clear_ocr_block_value(announce=False)
+                            self.valor_recuperacao_ocr = None
+                            self.high_jump_candidate = None
+                            self.high_jump_count = 0
+                            print(f"[OCR-RESYNC] Placar re-sincronizado para {score} sem fechar rally.")
                     else:
-                        self.valor_recuperacao_ocr = None
-                    self.pending_score_prev_base = self.prev_score
-                    self.pending_score_change = accepted_score
-                    self.pending_score_change_ts = timestamp_s
-                    self.pending_score_drawer_snapshot = self._ordered_ball_drawer()
-                    self.pending_score_forced = forced_by_error
-                    self.invalid_ocr_candidate = None
-                    self.tentativas_ocr = 0
-                else:
-                    print(f"[OCR-REJECT] Mudança inválida: {self.prev_score} -> {score}.")
-                    self.invalid_ocr_candidate = score
-                    self.tentativas_ocr = 0
+                        print(f"[OCR-REJECT] Mudança inválida: {self.prev_score} -> {score}.")
+                        self.high_jump_candidate = None
+                        self.high_jump_count = 0
 
         rally_finished = False
         point_label = None
@@ -1637,6 +1874,12 @@ class AnalyticsEngine:
             analysis_drawer = self._ordered_drawer_copy(self.pending_score_drawer_snapshot)
             if not analysis_drawer:
                 analysis_drawer = self._ordered_ball_drawer()
+            speed_peak, speed_mean = self._speed_metrics_from_drawer(analysis_drawer)
+            trajectory_for_rally: List[Tuple[int, float, float]] = list(self.current_rally_trajectory)
+            if not trajectory_for_rally and analysis_drawer:
+                start_frame_guess = int(self.rally_mgr.active.start_frame) if self.rally_mgr.active is not None else int(frame_idx - len(analysis_drawer))
+                for idx, (x, y, _t) in enumerate(analysis_drawer):
+                    trajectory_for_rally.append((int(start_frame_guess + idx), float(x), float(y)))
 
             winner = self._winner_from_score_change(
                 self.pending_score_change,
@@ -1658,8 +1901,10 @@ class AnalyticsEngine:
             inconclusivo = True
             resultado = "RALLY_ONLY"
             ptype = "RALLY_ONLY"
-            if len(analysis_drawer) < self.min_frames_for_technical_stats:
-                print("[INFO] Rali contabilizado por placar, mas com <8 frames: sem classificação técnica.")
+            net_crossing_detected = bool(self.rally_crossings > 0 or self._drawer_crossed_net(tracker))
+            can_classify_short = bool(len(analysis_drawer) >= self.min_frames_for_technical_stats or net_crossing_detected)
+            if not can_classify_short:
+                print("[INFO] Rali contabilizado por placar, mas sem frames/crossing suficientes para classificação técnica.")
             else:
                 attacker_hint = self.last_attacker_before_net
                 if attacker_hint not in ("CampoA", "CampoB"):
@@ -1683,13 +1928,17 @@ class AnalyticsEngine:
                         inconclusivo = False
                         resultado = "SPIKE"
                         ptype = "POINT_BY_SPIKE"
+                    elif decision_result == "FREEBALL":
+                        inconclusivo = False
+                        resultado = "FREEBALL"
+                        ptype = "FREEBALL"
 
             winner_effective = winner
             if winner_effective == "Unknown":
                 if lado_origem in ("CampoA", "CampoB"):
                     if resultado == "BLOCK":
                         winner_effective = self._team_for_side(self._other_side(lado_origem))
-                    elif resultado == "SPIKE":
+                    elif resultado in ("SPIKE", "FREEBALL"):
                         winner_effective = self._team_for_side(lado_origem)
                 elif self.posse_atual in ("CampoA", "CampoB"):
                     winner_effective = self._team_for_side(self.posse_atual)
@@ -1698,6 +1947,7 @@ class AnalyticsEngine:
 
             self.point_finalized = True
             ptype = self.update_stats(baseline_ptype=ptype, winner=winner_effective, timestamp_s=timestamp_s)
+            self.visual_end_state = self.RALLY_CONFIRMED_OCR
 
             if final_score is not None:
                 self.prev_score = final_score
@@ -1709,8 +1959,11 @@ class AnalyticsEngine:
             self.pending_score_prev_base = None
             self.pending_score_forced = False
             self.invalid_ocr_candidate = None
+            self.high_jump_candidate = None
+            self.high_jump_count = 0
             self.tentativas_ocr = 0
             self.last_point_time = float(timestamp_s)
+            self.last_point_frame = int(frame_idx)
             self.rally_counter += 1
             self.counts["Rallies"] += 1
             self.rally_closed_by_scoreboard = True
@@ -1720,9 +1973,13 @@ class AnalyticsEngine:
                 frame_idx=frame_idx,
                 winner=winner_effective,
                 ptype="RALLY_ONLY" if inconclusivo else resultado,
-                max_speed=tracker._instant_speed(),
+                max_speed=speed_peak,
                 impact=ball_state.court,
                 reason="score_change",
+                attacker=lado_origem,
+                net_crossings=self.rally_crossings,
+                ball_speed_mean=speed_mean,
+                trajectory=trajectory_for_rally,
             )
             if inconclusivo:
                 print("[FINAL] Rali terminado, mas trajetória inconclusiva. Apenas +1 no contador de ralis.")
@@ -1733,6 +1990,9 @@ class AnalyticsEngine:
                 elif resultado == "BLOCK":
                     self.counts["Blocks"] += 1
                     self.counts["POINT_BY_BLOCK"] += 1
+                elif resultado == "FREEBALL":
+                    self.counts["Freeballs"] += 1
+                    self.counts["FREEBALL"] += 1
 
             # End-of-rally cleanup for next possession/event cycle (hard reset).
             self._reset_for_new_service(tracker, source="OCR")
