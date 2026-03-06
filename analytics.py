@@ -364,6 +364,11 @@ class AnalyticsEngine:
         self.pending_score_prev_base: Optional[Tuple[int, int, int, int]] = None
         self.pending_score_forced: bool = False
         self.invalid_ocr_candidate: Optional[Tuple[int, int, int, int]] = None
+        self.invalid_ocr_retry_limit: int = 4
+        self.ocr_lock: Dict[str, Optional[Dict[str, int]]] = {
+            "teamA": None,
+            "teamB": None,
+        }
         self.valor_bloqueado_ocr: Optional[Tuple[int, int, int, int]] = None
         self.valor_recuperacao_ocr: Optional[Tuple[int, int, int, int]] = None
         self.valor_bloqueado_ocr_until: float = -1e9
@@ -704,6 +709,70 @@ class AnalyticsEngine:
         if winner_team == "TeamB":
             return (a_set, a_pts, b_set, b_pts + 1)
         return prev_score
+
+    def _clear_ocr_digit_lock(self) -> None:
+        self.ocr_lock["teamA"] = None
+        self.ocr_lock["teamB"] = None
+
+    def _apply_ocr_digit_lock(
+        self,
+        score: Optional[Tuple[int, int, int, int]],
+    ) -> Optional[Tuple[int, int, int, int]]:
+        if score is None:
+            return None
+
+        a_set, a_pts, b_set, b_pts = map(int, score)
+        lock_a = self.ocr_lock.get("teamA")
+        lock_b = self.ocr_lock.get("teamB")
+
+        if lock_a is not None and a_pts == int(lock_a["raw"]):
+            a_pts = int(lock_a["correct"])
+        if lock_b is not None and b_pts == int(lock_b["raw"]):
+            b_pts = int(lock_b["correct"])
+
+        return (a_set, a_pts, b_set, b_pts)
+
+    def _set_ocr_digit_lock_from_failsafe(
+        self,
+        prev_score: Optional[Tuple[int, int, int, int]],
+        raw_score: Optional[Tuple[int, int, int, int]],
+        corrected_score: Optional[Tuple[int, int, int, int]],
+    ) -> None:
+        if prev_score is None or raw_score is None or corrected_score is None:
+            return
+
+        self._clear_ocr_digit_lock()
+        prev_a_pts, prev_b_pts = int(prev_score[1]), int(prev_score[3])
+        corr_a_pts, corr_b_pts = int(corrected_score[1]), int(corrected_score[3])
+        raw_a_pts, raw_b_pts = int(raw_score[1]), int(raw_score[3])
+
+        if corr_a_pts == prev_a_pts + 1 and corr_b_pts == prev_b_pts:
+            if raw_a_pts != corr_a_pts:
+                self.ocr_lock["teamA"] = {"raw": raw_a_pts, "correct": corr_a_pts}
+        elif corr_b_pts == prev_b_pts + 1 and corr_a_pts == prev_a_pts:
+            if raw_b_pts != corr_b_pts:
+                self.ocr_lock["teamB"] = {"raw": raw_b_pts, "correct": corr_b_pts}
+
+    def _failsafe_plus_one_from_invalid_read(
+        self,
+        prev_score: Optional[Tuple[int, int, int, int]],
+        invalid_score: Optional[Tuple[int, int, int, int]],
+    ) -> Optional[Tuple[int, int, int, int]]:
+        if prev_score is None or invalid_score is None:
+            return None
+
+        old_a, old_b = int(prev_score[1]), int(prev_score[3])
+        ocr_a, ocr_b = int(invalid_score[1]), int(invalid_score[3])
+        if ocr_a == old_a and ocr_b == old_b:
+            return None
+
+        delta_a = abs(ocr_a - old_a)
+        delta_b = abs(ocr_b - old_b)
+        winner_team = "TeamA" if delta_a > delta_b else "TeamB"
+        inferred = self._score_plus_one(prev_score, winner_team)
+        if not self._is_logical_score_change(prev_score, inferred):
+            return None
+        return inferred
 
     def _infer_forced_score_from_invalid_read(
         self,
@@ -1847,16 +1916,20 @@ class AnalyticsEngine:
         self.prev_visible_in_block_zone = in_block_zone
 
         if frame_idx % config.ocr_every_n_frames == 0 and self.pending_score_change is None:
-            score_stable = self.ocr.read(frame)
-            score_raw = getattr(self.ocr, "last_raw_score", None)
+            score_stable_raw = self.ocr.read(frame)
+            score_raw_raw = getattr(self.ocr, "last_raw_score", None)
+            score_stable = self._apply_ocr_digit_lock(score_stable_raw)
+            score_raw = self._apply_ocr_digit_lock(score_raw_raw)
             self.last_ocr_score_stable = score_stable
             self.last_ocr_score_raw = score_raw
 
             score = score_stable
+            score_for_failsafe_lock = score_stable_raw
             # Score-first closure: if stable OCR lags, use raw changed reading.
             if self.prev_score is not None:
                 if (score is None or score == self.prev_score) and score_raw is not None and score_raw != self.prev_score:
                     score = score_raw
+                    score_for_failsafe_lock = score_raw_raw
                 # Release OCR locks as soon as OCR aligns with official score.
                 if score_stable == self.prev_score or score_raw == self.prev_score:
                     self._clear_ocr_block_value(announce=False)
@@ -1880,34 +1953,59 @@ class AnalyticsEngine:
             if self.prev_score is None:
                 if score is not None:
                     self.prev_score = score
+                    self._clear_ocr_digit_lock()
+                    self.invalid_ocr_candidate = None
+                    self.tentativas_ocr = 0
                     self._reset_ocr_correction_tracking()
                 elif score_raw is not None:
                     self.prev_score = score_raw
+                    self._clear_ocr_digit_lock()
+                    self.invalid_ocr_candidate = None
+                    self.tentativas_ocr = 0
                     self._reset_ocr_correction_tracking()
             elif score is not None:
                 # Release OCR lock once reading aligns with official score.
                 if score == self.prev_score:
                     self._clear_ocr_block_value(announce=False)
                     self.valor_recuperacao_ocr = None
+                    self.invalid_ocr_candidate = None
+                    self.tentativas_ocr = 0
                     self.high_jump_candidate = None
                     self.high_jump_count = 0
                     self._reset_ocr_correction_tracking()
                 else:
                     accepted_score: Optional[Tuple[int, int, int, int]] = None
-                    accepted_reason: Optional[str] = None
+                    forced_update = False
+
                     if self._is_logical_score_change(self.prev_score, score):
                         accepted_score = score
-                        accepted_reason = "strict+1"
+                        # New valid OCR +1 progression: drop any temporary digit lock.
+                        self._clear_ocr_digit_lock()
+                        self.invalid_ocr_candidate = None
+                        self.tentativas_ocr = 0
                     else:
-                        partial_score = self._partial_plus_one_score_update(self.prev_score, score)
-                        if partial_score is not None and self._is_logical_score_change(self.prev_score, partial_score):
-                            accepted_score = partial_score
-                            accepted_reason = "partial+1"
+                        points_changed = bool(
+                            int(score[1]) != int(self.prev_score[1])
+                            or int(score[3]) != int(self.prev_score[3])
+                        )
+                        if points_changed:
+                            self.invalid_ocr_candidate = score
+                            self.tentativas_ocr += 1
+                            print(
+                                f"[OCR-RETRY] leitura inválida {self.prev_score} -> {score} "
+                                f"({self.tentativas_ocr}/{self.invalid_ocr_retry_limit})."
+                            )
+
+                            if self.tentativas_ocr >= self.invalid_ocr_retry_limit:
+                                failsafe_score = self._failsafe_plus_one_from_invalid_read(self.prev_score, score)
+                                if failsafe_score is not None:
+                                    accepted_score = failsafe_score
+                                    forced_update = True
                         else:
-                            failsafe_score = self.failsafe_score_update(self.prev_score, score)
-                            if failsafe_score is not None and self._is_logical_score_change(self.prev_score, failsafe_score):
-                                accepted_score = failsafe_score
-                                accepted_reason = "failsafe"
+                            # Sets-only noise or no points movement: ignore and reset retry streak.
+                            print(f"[OCR-REJECT] Mudança inválida sem alteração de pontos: {self.prev_score} -> {score}.")
+                            self.invalid_ocr_candidate = None
+                            self.tentativas_ocr = 0
 
                     if accepted_score is not None:
                         # Temporal protection: avoid duplicate rally counting.
@@ -1919,15 +2017,16 @@ class AnalyticsEngine:
                             self.high_jump_candidate = None
                             self.high_jump_count = 0
                         else:
-                            if accepted_reason == "partial+1" and accepted_score != score:
-                                print(
-                                    f"[OCR-PARTIAL-VALID] OCR parcial aceite: leitura={score} "
-                                    f"-> oficial {self.prev_score} para {accepted_score}."
+                            if forced_update:
+                                self._set_ocr_digit_lock_from_failsafe(
+                                    prev_score=self.prev_score,
+                                    raw_score=score_for_failsafe_lock,
+                                    corrected_score=accepted_score,
                                 )
-                            elif accepted_reason == "failsafe":
                                 print(
-                                    f"[OCR-FAILSAFE-VALID] leitura impossível={score} "
-                                    f"-> oficial {self.prev_score} para {accepted_score}."
+                                    f"[OCR-FAILSAFE] {self.tentativas_ocr} tentativas inválidas. "
+                                    f"Forçando {self.prev_score} -> {accepted_score} "
+                                    f"com base na leitura {score}."
                                 )
                             else:
                                 print(f"[OCR-VALID] Mudança +1 confirmada: {self.prev_score} -> {accepted_score}.")
@@ -1935,57 +2034,13 @@ class AnalyticsEngine:
                             self.pending_score_change = accepted_score
                             self.pending_score_change_ts = timestamp_s
                             self.pending_score_drawer_snapshot = self._ordered_ball_drawer()
-                            self.pending_score_forced = False
+                            self.pending_score_forced = forced_update
                             self.invalid_ocr_candidate = None
                             self.tentativas_ocr = 0
                             self.high_jump_candidate = None
                             self.high_jump_count = 0
                             self._reset_ocr_correction_tracking()
-                    elif self._is_score_lower_than_current(self.prev_score, score):
-                        correction_target = self._build_large_downward_correction(self.prev_score, score)
-                        if correction_target is not None:
-                            corr_hits = self._update_ocr_correction_counter(correction_target)
-                            print(
-                                f"[OCR-CORRECTION-CANDIDATE] oficial={self.prev_score} OCR={score} "
-                                f"target={correction_target} ({corr_hits}/{self.ocr_correction_min_persist})."
-                            )
-                            if corr_hits >= self.ocr_correction_min_persist:
-                                print("[OCR-CORRECTION] Fixing incorrect initial score")
-                                self.prev_score = correction_target
-                                self.ocr.stable_score = correction_target
-                                self._clear_ocr_block_value(announce=False)
-                                self.valor_recuperacao_ocr = None
-                                self.high_jump_candidate = None
-                                self.high_jump_count = 0
-                                self._reset_ocr_correction_tracking()
-                        else:
-                            # OCR regression without persistent large-gap evidence: treat as noise.
-                            print(f"[OCR-NOISE] Leitura inferior ignorada: oficial={self.prev_score} OCR={score}.")
-                            self.high_jump_candidate = None
-                            self.high_jump_count = 0
-                            self._reset_ocr_correction_tracking()
-                    elif self._is_score_jump_above_plus_one(self.prev_score, score):
-                        # Ignore jumps unless persistent, then resync scoreboard (no rally event).
-                        self._reset_ocr_correction_tracking()
-                        if self.high_jump_candidate == score:
-                            self.high_jump_count += 1
-                        else:
-                            self.high_jump_candidate = score
-                            self.high_jump_count = 1
-                        print(
-                            f"[OCR-JUMP] Leitura >+1 detetada: {self.prev_score} -> {score} "
-                            f"(persistência {self.high_jump_count}/{self.high_jump_min_persist})."
-                        )
-                        if self.high_jump_count >= self.high_jump_min_persist:
-                            self.prev_score = score
-                            self.ocr.stable_score = score
-                            self._clear_ocr_block_value(announce=False)
-                            self.valor_recuperacao_ocr = None
-                            self.high_jump_candidate = None
-                            self.high_jump_count = 0
-                            print(f"[OCR-RESYNC] Placar re-sincronizado para {score} sem fechar rally.")
                     else:
-                        print(f"[OCR-REJECT] Mudança inválida: {self.prev_score} -> {score}.")
                         self.high_jump_candidate = None
                         self.high_jump_count = 0
                         self._reset_ocr_correction_tracking()
