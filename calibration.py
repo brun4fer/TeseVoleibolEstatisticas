@@ -1,7 +1,7 @@
 import json
 import os
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -21,9 +21,38 @@ def _save_calibration(homography: np.ndarray, net_line: Tuple[Tuple[int, int], T
         "H": homography.tolist(),
         "net_line": {"p1": net_line[0], "p2": net_line[1]},
         "score_roi": score_roi,
+        "scoreboard_roi": {
+            "x": int(score_roi[0]),
+            "y": int(score_roi[1]),
+            "w": int(score_roi[2]),
+            "h": int(score_roi[3]),
+        },
     }
     with open(CALIB_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
+
+
+def _parse_score_roi(data: dict) -> Optional[Tuple[int, int, int, int]]:
+    scoreboard_roi = data.get("scoreboard_roi")
+    if isinstance(scoreboard_roi, dict):
+        try:
+            return (
+                int(scoreboard_roi["x"]),
+                int(scoreboard_roi["y"]),
+                int(scoreboard_roi["w"]),
+                int(scoreboard_roi["h"]),
+            )
+        except (KeyError, TypeError, ValueError):
+            pass
+
+    raw_roi = data.get("score_roi")
+    if isinstance(raw_roi, (list, tuple)) and len(raw_roi) == 4:
+        try:
+            return tuple(int(v) for v in raw_roi)  # type: ignore[return-value]
+        except (TypeError, ValueError):
+            return None
+
+    return None
 
 
 def _load_calibration() -> Tuple[np.ndarray, Tuple[Tuple[int, int], Tuple[int, int]], Tuple[int, int, int, int]]:
@@ -40,7 +69,7 @@ def _load_calibration() -> Tuple[np.ndarray, Tuple[Tuple[int, int], Tuple[int, i
             net_y = int(net_line_data) if isinstance(net_line_data, (int, float)) else 0
             p1 = (0, net_y)
             p2 = (1920, net_y)
-        score_roi = tuple(data.get("score_roi", config.score_roi))
+        score_roi = _parse_score_roi(data) or tuple(config.score_roi)
         return H, (p1, p2), score_roi  # type: ignore
 
     # backward compat: older H.npy/net.json
@@ -53,6 +82,20 @@ def _load_calibration() -> Tuple[np.ndarray, Tuple[Tuple[int, int], Tuple[int, i
         return H, (tuple(d["p1"]), tuple(d["p2"])), config.score_roi  # type: ignore
 
     return None, None, None  # type: ignore
+
+
+def _load_stored_score_roi() -> Tuple[int, int, int, int]:
+    if CALIB_FILE.exists():
+        with open(CALIB_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        score_roi = _parse_score_roi(data)
+        if score_roi is not None:
+            return score_roi
+
+    raise RuntimeError(
+        "Scoreboard ROI nao encontrado em calibration/field_params.json. "
+        "Defina 'score_roi' ou 'scoreboard_roi' no arquivo de calibracao."
+    )
 
 
 def collect_points(frame: np.ndarray) -> List[Tuple[int, int]]:
@@ -92,16 +135,6 @@ def collect_points(frame: np.ndarray) -> List[Tuple[int, int]]:
     return points
 
 
-def select_score_roi(frame: np.ndarray) -> Tuple[int, int, int, int]:
-    """Abre seletor interativo para ROI do marcador."""
-    title = "Selecione o Placar (Desenhe o retangulo e pressione ENTER)"
-    cv2.startWindowThread()
-    cv2.namedWindow(title, cv2.WINDOW_AUTOSIZE)
-    roi = cv2.selectROI(title, frame, showCrosshair=True, fromCenter=False)
-    cv2.destroyWindow(title)
-    return tuple(map(int, roi))
-
-
 def compute_homography(court_px: List[Tuple[int, int]]) -> np.ndarray:
     real = np.array([[0, 0], [COURT_W, 0], [COURT_W, COURT_L], [0, COURT_L]], dtype=np.float32)
     img = np.array(court_px[:4], dtype=np.float32)
@@ -138,7 +171,7 @@ def run_calibration(cfg=config, force: bool = False) -> Tuple[np.ndarray, Tuple[
     if len(pts) != 6:
         raise RuntimeError("Calibracao cancelada/incompleta (6 cliques).")
 
-    score_roi = select_score_roi(frame)
+    score_roi = _load_stored_score_roi()
     H = compute_homography(pts)
     net_line = (pts[4], pts[5])
     _save_calibration(H, net_line, score_roi)
