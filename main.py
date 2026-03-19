@@ -6,11 +6,16 @@ Loop principal do sistema de análise de voleibol.
 
 import cv2
 import numpy as np
+from typing import Optional, Tuple
 
 from analytics import AnalyticsEngine, draw_sidebar
 from calibration import run_calibration
 from config import config
+from scoreboard_template_reader import ScoreboardReader
 from tracker import VolleyballTracker
+
+
+VALID_SET_VALUES = {0, 1, 2, 3}
 
 
 def draw_players(frame, players):
@@ -59,6 +64,23 @@ def draw_ocr_roi_debug(frame, roi):
     cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
 
 
+def validate_score(
+    prev_score: Optional[Tuple[int, int, int, int]],
+    new_score: Tuple[int, int, int, int],
+) -> Tuple[int, int, int, int]:
+    sets_a, points_a, sets_b, points_b = new_score
+
+    prev_sets_a = prev_score[0] if prev_score is not None else 0
+    prev_sets_b = prev_score[2] if prev_score is not None else 0
+
+    if sets_a not in VALID_SET_VALUES:
+        sets_a = prev_sets_a
+    if sets_b not in VALID_SET_VALUES:
+        sets_b = prev_sets_b
+
+    return (sets_a, points_a, sets_b, points_b)
+
+
 def main():
     config.ensure_dirs()
     H, net_line, score_roi = run_calibration(config, force=True)
@@ -66,8 +88,8 @@ def main():
     if score_roi is not None:
         config.score_roi = tuple(score_roi)
 
+    reader = ScoreboardReader(templates_dir="digit_templates")
     tracker = VolleyballTracker(H, net_line)
-    analytics = AnalyticsEngine()
 
     cap = cv2.VideoCapture(str(config.video_path()))
     if not cap.isOpened():
@@ -75,6 +97,26 @@ def main():
     fps = cap.get(cv2.CAP_PROP_FPS)
     start_f, end_f = config.time_window_frames(fps)
     cap.set(cv2.CAP_PROP_POS_FRAMES, start_f)
+
+    ok, first_frame = cap.read()
+    if not ok:
+        raise RuntimeError("Nao foi possivel ler o primeiro frame do video.")
+
+    config.score_roi = tuple(reader.set_roi(first_frame))
+    raw_read = reader.read
+    prev_score = validate_score(None, raw_read(first_frame))
+
+    def validated_read(frame):
+        nonlocal prev_score
+        raw_score = raw_read(frame)
+        score = validate_score(prev_score, raw_score)
+        prev_score = score
+        return score
+
+    reader.read = validated_read
+    cap.set(cv2.CAP_PROP_POS_FRAMES, start_f)
+
+    analytics = AnalyticsEngine(reader)
 
     frame_idx = start_f
     skip_rate = 1  # processar todos os frames para não perder o início do serviço

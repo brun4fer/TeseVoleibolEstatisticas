@@ -30,8 +30,6 @@ def _save_calibration(homography: np.ndarray, net_line: Tuple[Tuple[int, int], T
     }
     with open(CALIB_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
-
-
 def _parse_score_roi(data: dict) -> Optional[Tuple[int, int, int, int]]:
     scoreboard_roi = data.get("scoreboard_roi")
     if isinstance(scoreboard_roi, dict):

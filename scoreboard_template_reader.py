@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Tuple
+from typing import Dict, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -13,6 +13,8 @@ TARGET_SIZE = (40, 40)
 DEFAULT_SET_RATIO = 0.30
 DEFAULT_BLOCK_SIZE = 21
 DEFAULT_THRESHOLD_C = 10
+DEFAULT_ROI_SEARCH = 18
+DEFAULT_ROI_SIZE_SEARCH = 10
 
 
 @dataclass(frozen=True)
@@ -29,6 +31,13 @@ REGION_SPECS = (
     RegionSpec("points_b", invert=True, margins=(0.14, 0.04, 0.08, 0.00)),
 )
 
+ALLOWED_DIGITS_BY_REGION = {
+    "sets_a": tuple(range(6)),
+    "points_a": tuple(range(10)),
+    "sets_b": tuple(range(6)),
+    "points_b": tuple(range(10)),
+}
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -37,7 +46,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--video", required=True, help="Path to the video file.")
     parser.add_argument(
         "--templates-dir",
-        default="templates",
+        default="digit_templates",
         help="Directory containing digit templates 0.png to 9.png.",
     )
     parser.add_argument(
@@ -77,13 +86,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--roi-search",
         type=int,
-        default=8,
+        default=DEFAULT_ROI_SEARCH,
         help="Pixel radius used to refine the selected ROI position.",
     )
     parser.add_argument(
         "--roi-size-search",
         type=int,
-        default=4,
+        default=DEFAULT_ROI_SIZE_SEARCH,
         help="Pixel radius used to refine the selected ROI size.",
     )
     return parser.parse_args()
@@ -307,6 +316,38 @@ def split_scoreboard_roi(roi: np.ndarray, set_ratio: float) -> Dict[str, np.ndar
     }
 
 
+def match_digit(
+    processed: np.ndarray,
+    templates: Dict[int, np.ndarray],
+    allowed_digits: Tuple[int, ...] | None = None,
+) -> tuple[int, float]:
+    processed_std = float(np.std(processed))
+    if processed_std < 1e-6:
+        return 0, -1.0
+
+    digit_pool = allowed_digits if allowed_digits is not None else tuple(sorted(templates.keys()))
+    best_digit = 0
+    best_score = float("-inf")
+
+    for digit in digit_pool:
+        template = templates[digit]
+        template_std = float(np.std(template))
+        if template_std < 1e-6:
+            continue
+
+        score = float(
+            cv2.matchTemplate(processed, template, cv2.TM_CCOEFF_NORMED)[0, 0]
+        )
+        if score > best_score:
+            best_digit = digit
+            best_score = score
+
+    if best_score == float("-inf"):
+        return 0, -1.0
+
+    return best_digit, best_score
+
+
 def read_scoreboard_roi(
     roi: np.ndarray,
     templates: Dict[int, np.ndarray],
@@ -329,38 +370,16 @@ def read_scoreboard_roi(
             block_size,
             threshold_c,
         )
-        digit, score = match_digit(processed, templates)
+        digit, score = match_digit(
+            processed,
+            templates,
+            allowed_digits=ALLOWED_DIGITS_BY_REGION.get(spec.name),
+        )
         results[spec.name] = digit
         debug_info[spec.name] = (cropped_digit, processed, score)
         total_score += score
 
     return results, debug_info, total_score
-
-
-def match_digit(processed: np.ndarray, templates: Dict[int, np.ndarray]) -> tuple[int, float]:
-    processed_std = float(np.std(processed))
-    if processed_std < 1e-6:
-        return 0, -1.0
-
-    best_digit = 0
-    best_score = float("-inf")
-
-    for digit, template in templates.items():
-        template_std = float(np.std(template))
-        if template_std < 1e-6:
-            continue
-
-        score = float(
-            cv2.matchTemplate(processed, template, cv2.TM_CCOEFF_NORMED)[0, 0]
-        )
-        if score > best_score:
-            best_digit = digit
-            best_score = score
-
-    if best_score == float("-inf"):
-        return 0, -1.0
-
-    return best_digit, best_score
 
 
 def refine_scoreboard_roi(
@@ -375,6 +394,17 @@ def refine_scoreboard_roi(
 ) -> tuple[int, int, int, int]:
     frame_height, frame_width = frame.shape[:2]
     score_cache: Dict[tuple[int, int, int, int], float | None] = {}
+    initial_w = int(initial_roi[2])
+    initial_h = int(initial_roi[3])
+    search_radius = max(search_radius, int(round(max(initial_w, initial_h) * 0.20)))
+    size_radius = max(size_radius, int(round(max(initial_w, initial_h) * 0.10)))
+
+    def iter_steps(radius: int) -> Tuple[int, ...]:
+        steps = []
+        for step in (max(1, radius // 3), max(1, radius // 6), 1):
+            if step not in steps:
+                steps.append(step)
+        return tuple(steps)
 
     def score_rect(rect: tuple[int, int, int, int]) -> float | None:
         if rect in score_cache:
@@ -399,16 +429,17 @@ def refine_scoreboard_roi(
         score_cache[rect] = total_score
         return total_score
 
-    def search_position(
+    def search_position_once(
         rect: tuple[int, int, int, int],
         radius: int,
+        step: int,
     ) -> tuple[int, int, int, int]:
         base_x, base_y, base_w, base_h = rect
         best_rect = rect
         best_score = float("-inf")
 
-        for delta_x in range(-radius, radius + 1):
-            for delta_y in range(-radius, radius + 1):
+        for delta_x in range(-radius, radius + 1, step):
+            for delta_y in range(-radius, radius + 1, step):
                 candidate_rect = (
                     base_x + delta_x,
                     base_y + delta_y,
@@ -426,9 +457,21 @@ def refine_scoreboard_roi(
 
         return best_rect
 
-    def search_size(
+    def search_position(
         rect: tuple[int, int, int, int],
         radius: int,
+    ) -> tuple[int, int, int, int]:
+        best_rect = rect
+        current_radius = radius
+        for step in iter_steps(radius):
+            best_rect = search_position_once(best_rect, current_radius, step)
+            current_radius = max(step, current_radius // 2)
+        return best_rect
+
+    def search_size_once(
+        rect: tuple[int, int, int, int],
+        radius: int,
+        step: int,
     ) -> tuple[int, int, int, int]:
         base_x, base_y, base_w, base_h = rect
         center_x = base_x + (base_w / 2.0)
@@ -436,12 +479,12 @@ def refine_scoreboard_roi(
         best_rect = rect
         best_score = float("-inf")
 
-        for delta_w in range(-radius, radius + 1):
+        for delta_w in range(-radius, radius + 1, step):
             candidate_w = base_w + delta_w
             if candidate_w < 8:
                 continue
 
-            for delta_h in range(-radius, radius + 1):
+            for delta_h in range(-radius, radius + 1, step):
                 candidate_h = base_h + delta_h
                 if candidate_h < 8:
                     continue
@@ -463,6 +506,17 @@ def refine_scoreboard_roi(
                     best_score = candidate_score
                     best_rect = candidate_rect
 
+        return best_rect
+
+    def search_size(
+        rect: tuple[int, int, int, int],
+        radius: int,
+    ) -> tuple[int, int, int, int]:
+        best_rect = rect
+        current_radius = radius
+        for step in iter_steps(radius):
+            best_rect = search_size_once(best_rect, current_radius, step)
+            current_radius = max(step, current_radius // 2)
         return best_rect
 
     candidates = [initial_roi]
@@ -552,47 +606,114 @@ def draw_roi_overlay(roi: np.ndarray, set_ratio: float, results: Dict[str, int])
     return overlay
 
 
-def select_scoreboard_roi(cap: cv2.VideoCapture, start_frame: int) -> tuple[int, int, int, int]:
-    cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
-    ok, frame = cap.read()
-    if not ok:
-        raise RuntimeError("Could not read the frame used for ROI selection.")
+class ScoreboardReader:
+    def __init__(
+        self,
+        templates_dir: str | Path,
+        set_ratio: float = DEFAULT_SET_RATIO,
+        block_size: int = DEFAULT_BLOCK_SIZE,
+        threshold_c: int = DEFAULT_THRESHOLD_C,
+        roi_search: int = DEFAULT_ROI_SEARCH,
+        roi_size_search: int = DEFAULT_ROI_SIZE_SEARCH,
+    ):
+        if not 0.0 < set_ratio < 1.0:
+            raise ValueError("set_ratio must be between 0 and 1.")
+        if roi_search < 0:
+            raise ValueError("roi_search must be 0 or greater.")
+        if roi_size_search < 0:
+            raise ValueError("roi_size_search must be 0 or greater.")
 
-    selection = cv2.selectROI("Select Scoreboard ROI", frame, fromCenter=False, showCrosshair=True)
-    cv2.destroyWindow("Select Scoreboard ROI")
+        resolved_templates_dir = Path(templates_dir)
+        if not resolved_templates_dir.is_absolute():
+            resolved_templates_dir = Path(__file__).resolve().parent / resolved_templates_dir
+        if not resolved_templates_dir.exists():
+            raise FileNotFoundError(f"Templates directory not found: {resolved_templates_dir}")
 
-    x, y, w, h = [int(v) for v in selection]
-    if w <= 0 or h <= 0:
-        raise RuntimeError("ROI selection was cancelled or empty.")
-    return x, y, w, h
+        self.templates_dir = resolved_templates_dir
+        self.set_ratio = float(set_ratio)
+        self.block_size = ensure_odd(block_size)
+        self.threshold_c = int(threshold_c)
+        self.roi_search = int(roi_search)
+        self.roi_size_search = int(roi_size_search)
+        self.templates = load_templates(self.templates_dir, TARGET_SIZE)
+        self.roi: Optional[tuple[int, int, int, int]] = None
+        self.last_results: Optional[Dict[str, int]] = None
+        self.last_debug_info: Dict[str, tuple[np.ndarray, np.ndarray, float]] = {}
+        self.last_total_score: float = 0.0
+
+    def set_roi(self, frame: np.ndarray) -> tuple[int, int, int, int]:
+        if self.roi is not None:
+            return self.roi
+
+        selection = cv2.selectROI(
+            "Select Scoreboard ROI",
+            frame,
+            fromCenter=False,
+            showCrosshair=True,
+        )
+        cv2.destroyWindow("Select Scoreboard ROI")
+
+        x, y, w, h = [int(v) for v in selection]
+        if w <= 0 or h <= 0:
+            raise RuntimeError("ROI selection was cancelled or empty.")
+
+        self.roi = refine_scoreboard_roi(
+            frame,
+            (x, y, w, h),
+            self.templates,
+            self.set_ratio,
+            self.block_size,
+            self.threshold_c,
+            self.roi_search,
+            self.roi_size_search,
+        )
+        return self.roi
+
+    def read(self, frame: np.ndarray) -> tuple[int, int, int, int]:
+        if self.roi is None:
+            raise RuntimeError("Scoreboard ROI has not been selected yet.")
+
+        x, y, w, h = self.roi
+        roi = frame[y : y + h, x : x + w]
+        if roi.size == 0:
+            raise RuntimeError("Selected ROI is outside the frame bounds.")
+
+        results, debug_info, total_score = read_scoreboard_roi(
+            roi,
+            self.templates,
+            self.set_ratio,
+            self.block_size,
+            self.threshold_c,
+        )
+        self.last_results = results
+        self.last_debug_info = debug_info
+        self.last_total_score = total_score
+        return (
+            results["sets_a"],
+            results["points_a"],
+            results["sets_b"],
+            results["points_b"],
+        )
 
 
 def main() -> None:
     args = parse_args()
 
-    if not 0.0 < args.set_ratio < 1.0:
-        raise ValueError("--set-ratio must be between 0 and 1.")
     if args.frame_step < 1:
         raise ValueError("--frame-step must be at least 1.")
-    if args.roi_search < 0:
-        raise ValueError("--roi-search must be 0 or greater.")
-    if args.roi_size_search < 0:
-        raise ValueError("--roi-size-search must be 0 or greater.")
-
-    block_size = ensure_odd(args.block_size)
-    threshold_c = args.threshold_c
 
     video_path = Path(args.video)
     if not video_path.exists():
         raise FileNotFoundError(f"Video not found: {video_path}")
 
-    templates_dir = Path(args.templates_dir)
-    if not templates_dir.is_absolute():
-        templates_dir = Path(__file__).resolve().parent / templates_dir
-    if not templates_dir.exists():
-        raise FileNotFoundError(f"Templates directory not found: {templates_dir}")
-
-    templates = load_templates(templates_dir, TARGET_SIZE)
+    reader = ScoreboardReader(
+        templates_dir=args.templates_dir,
+        set_ratio=args.set_ratio,
+        block_size=args.block_size,
+        threshold_c=args.threshold_c,
+        roi_search=args.roi_search,
+        roi_size_search=args.roi_size_search,
+    )
 
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
@@ -618,23 +739,12 @@ def main() -> None:
         if end_frame < start_frame:
             raise ValueError("--end must be after --start.")
 
-        roi_x, roi_y, roi_w, roi_h = select_scoreboard_roi(cap, start_frame)
         cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
-        ok, refine_frame = cap.read()
+        ok, first_frame = cap.read()
         if not ok:
-            raise RuntimeError("Could not read the frame used for ROI refinement.")
+            raise RuntimeError("Could not read the frame used for ROI selection.")
 
-        refined_roi = refine_scoreboard_roi(
-            refine_frame,
-            (roi_x, roi_y, roi_w, roi_h),
-            templates,
-            args.set_ratio,
-            block_size,
-            threshold_c,
-            args.roi_search,
-            args.roi_size_search,
-        )
-        roi_x, roi_y, roi_w, roi_h = refined_roi
+        roi_x, roi_y, roi_w, roi_h = reader.set_roi(first_frame)
         print(
             f"Refined ROI: x={roi_x}, y={roi_y}, w={roi_w}, h={roi_h}",
             flush=True,
@@ -651,17 +761,12 @@ def main() -> None:
                 frame_index += 1
                 continue
 
-            roi = frame[roi_y : roi_y + roi_h, roi_x : roi_x + roi_w]
-            if roi.size == 0:
-                raise RuntimeError("Selected ROI is outside the frame bounds.")
+            sets_a, points_a, sets_b, points_b = reader.read(frame)
+            results = reader.last_results
+            debug_info = reader.last_debug_info
 
-            results, debug_info, _total_score = read_scoreboard_roi(
-                roi,
-                templates,
-                args.set_ratio,
-                block_size,
-                threshold_c,
-            )
+            if results is None:
+                raise RuntimeError("Reader returned no scoreboard data.")
 
             for spec in REGION_SPECS:
                 cropped_digit, processed, score = debug_info[spec.name]
@@ -674,11 +779,12 @@ def main() -> None:
                 )
                 cv2.imshow(f"DEBUG_{spec.name}", debug_panel)
 
-            roi_debug = draw_roi_overlay(roi, args.set_ratio, results)
+            roi = frame[roi_y : roi_y + roi_h, roi_x : roi_x + roi_w]
+            roi_debug = draw_roi_overlay(roi, reader.set_ratio, results)
             cv2.imshow("ROI", roi_debug)
 
-            print(f"SETS: {results['sets_a']}-{results['sets_b']}", flush=True)
-            print(f"POINTS: {results['points_a']}-{results['points_b']}", flush=True)
+            print(f"SETS: {sets_a}-{sets_b}", flush=True)
+            print(f"POINTS: {points_a}-{points_b}", flush=True)
             print(flush=True)
 
             key = cv2.waitKey(1) & 0xFF

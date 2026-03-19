@@ -11,21 +11,20 @@ from __future__ import annotations
 
 from collections import Counter, deque
 from dataclasses import dataclass, field
-import re
 from typing import Deque, Dict, List, Optional, Tuple
 
 import cv2
-import easyocr
 import numpy as np
 import pandas as pd
 
 from config import config
+from scoreboard_template_reader import ScoreboardReader
 
 
 # ----------------------------- OCR ----------------------------------
 class ScoreboardOCR:
-    def __init__(self):
-        self.reader = easyocr.Reader(list(config.score_reader_lang), gpu=True)
+    def __init__(self, reader: ScoreboardReader):
+        self.reader = reader
         self.stable_score: Optional[Tuple[int, int, int, int]] = None
         self.last_raw_score: Optional[Tuple[int, int, int, int]] = None
         self.last_returned_score: Optional[Tuple[int, int, int, int]] = None
@@ -33,29 +32,6 @@ class ScoreboardOCR:
         self.vote_window: Deque[Tuple[int, int, int, int]] = deque(maxlen=5)
         self.vote_min_hits: int = 3
         self.old_formatted: Optional[str] = None
-
-    def _extreme_binary(self, img, invert: bool = False):
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if len(img.shape) == 3 else img
-        blur = cv2.GaussianBlur(gray, (3, 3), 0)
-        mode = cv2.THRESH_BINARY_INV if invert else cv2.THRESH_BINARY
-        out = cv2.threshold(blur, 0, 255, mode + cv2.THRESH_OTSU)[1]
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
-        out = cv2.morphologyEx(out, cv2.MORPH_OPEN, kernel, iterations=1)
-        out = cv2.morphologyEx(out, cv2.MORPH_CLOSE, kernel, iterations=1)
-        return out
-
-    def _ocr_digits_only(self, img) -> str:
-        txt = "".join(self.reader.readtext(img, allowlist="0123456789", detail=0))
-        nums = re.findall(r"\d+", txt)
-        return "".join(nums) if nums else ""
-
-    def _to_int(self, txt: str, default: int = 0) -> int:
-        if not txt:
-            return default
-        try:
-            return int(txt)
-        except ValueError:
-            return default
 
     def _is_plausible_step(
         self,
@@ -89,48 +65,13 @@ class ScoreboardOCR:
         return False
 
     def read(self, frame) -> Optional[Tuple[int, int, int, int]]:
-        x, y, w, h = config.score_roi
-        roi = frame[y : y + h, x : x + w]
         if not getattr(config, "HEADLESS_MODE", False):
             dbg = frame.copy()
-            cv2.rectangle(dbg, (x, y), (x + w, y + h), (0, 255, 0), 2)
+            if self.reader.roi is not None:
+                x, y, w, h = self.reader.roi
+                cv2.rectangle(dbg, (x, y), (x + w, y + h), (0, 255, 0), 2)
             cv2.imshow("DEBUG_OCR_ROI", dbg)
-
-        # Top line = Team A, bottom line = Team B
-        mid_h = h // 2
-        top = roi[0:mid_h, :]
-        bot = roi[mid_h:h, :]
-
-        def split_and_process(line_img):
-            _, lw = line_img.shape[:2]
-            split_x = int(lw * 0.3)  # 30% sets, 70% points
-            zone_set = line_img[:, :split_x]
-            zone_pts = line_img[:, split_x:]
-
-            set_up = cv2.resize(zone_set, None, fx=3.0, fy=3.0, interpolation=cv2.INTER_CUBIC)
-            pts_up = cv2.resize(zone_pts, None, fx=3.0, fy=3.0, interpolation=cv2.INTER_CUBIC)
-
-            # Extreme contrast pass to remove background and highlight digits.
-            set_bin = self._extreme_binary(set_up, invert=True)
-            pts_bin = self._extreme_binary(pts_up, invert=True)
-
-            combined = cv2.hconcat([set_bin, pts_bin])
-            return set_bin, pts_bin, combined
-
-        set_top, pts_top, comb_top = split_and_process(top)
-        set_bot, pts_bot, comb_bot = split_and_process(bot)
-
-        txt_set_top = self._ocr_digits_only(set_top)
-        txt_pts_top = self._ocr_digits_only(pts_top)
-        txt_set_bot = self._ocr_digits_only(set_bot)
-        txt_pts_bot = self._ocr_digits_only(pts_bot)
-
-        a_set = self._to_int(txt_set_top[:1], default=0)
-        b_set = self._to_int(txt_set_bot[:1], default=0)
-        a_pts = self._to_int(txt_pts_top[:2], default=0)
-        b_pts = self._to_int(txt_pts_bot[:2], default=0)
-
-        parsed_raw = (a_set, a_pts, b_set, b_pts)
+        parsed_raw = self.reader.read(frame)
         self.last_raw_score = parsed_raw
         parsed = parsed_raw
         discard_candidate = False
@@ -141,19 +82,6 @@ class ScoreboardOCR:
             else:
                 discard_candidate = True
         self.last_read_discarded = bool(discard_candidate)
-
-        h_dbg = max(comb_top.shape[0], comb_bot.shape[0])
-        w_dbg = max(comb_top.shape[1], comb_bot.shape[1])
-        canvas = 255 * np.ones((h_dbg * 2 + 3, w_dbg, 1), dtype=np.uint8)
-        canvas[0:comb_top.shape[0], 0:comb_top.shape[1], 0] = comb_top
-        canvas[h_dbg + 3 : h_dbg + 3 + comb_bot.shape[0], 0:comb_bot.shape[1], 0] = comb_bot
-        canvas_bgr = cv2.cvtColor(canvas, cv2.COLOR_GRAY2BGR)
-        cv2.line(canvas_bgr, (0, h_dbg + 1), (w_dbg, h_dbg + 1), (0, 0, 255), 2)
-        cv2.line(canvas_bgr, (int(w_dbg * 0.3), 0), (int(w_dbg * 0.3), h_dbg), (0, 0, 255), 2)
-        cv2.line(canvas_bgr, (int(w_dbg * 0.3), h_dbg + 3), (int(w_dbg * 0.3), h_dbg + 3 + h_dbg), (0, 0, 255), 2)
-        if not getattr(config, "HEADLESS_MODE", False):
-            cv2.imshow("DEBUG_OCR", canvas_bgr)
-            cv2.waitKey(1)
 
         if not discard_candidate:
             self.vote_window.append(parsed)
@@ -341,9 +269,9 @@ def draw_sidebar(frame, rally_mgr: RallyManager, counts: Dict[str, int], rally_c
 
 # ---------------------- Main Engine -----------------------------
 class AnalyticsEngine:
-    def __init__(self):
+    def __init__(self, score_reader: ScoreboardReader):
         self.rally_mgr = RallyManager()
-        self.ocr = ScoreboardOCR()
+        self.ocr = ScoreboardOCR(score_reader)
         self.counts = {
             "ACE": 0,
             "POINT_BY_SPIKE": 0,
