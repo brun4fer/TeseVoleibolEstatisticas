@@ -19,10 +19,10 @@ from ultralytics import YOLO
 
 MODEL_PATH = Path("runs/detect/train/weights/best.pt")
 VIDEO_PATH = Path(
-    r"C:/Users/Utilizador/Desktop/Mestrado/Tese/VideosJogos/video-2026-02-24T15-06-27.171Z.mp4"
+    r"C:/Users/Utilizador/Desktop/Mestrado/Tese/VideosJogos/VideoAcademica.mp4"
 )
 
-START_TIME = "00:29:02"
+START_TIME = "00:29:30"
 END_TIME = "00:46:17"
 
 CONF_THRESHOLD = 0.15
@@ -30,7 +30,19 @@ RESIZE_WIDTH = 1280
 PIXELS_PER_METER = 50.0  # Ajustar ao video/resolucao para valores mais realistas.
 SMOOTHING_WINDOW = 5
 MAX_SPEED_KMH = 150.0
+MIN_BALL_BBOX_W = 8
+MIN_BALL_BBOX_H = 8
+MIN_BALL_BBOX_AREA = 64
+VALID_Y_MIN_RATIO = 0.18
+VALID_Y_MAX_RATIO = 0.92
+VALID_X_MIN_RATIO = 0.03
+VALID_X_MAX_RATIO = 0.97
+MIN_MOVEMENT_PIXELS = 5
+MAX_STATIONARY_FRAMES = 3
+MIN_VALID_SPEED_KMH = 1.0
+USE_MIN_SPEED_FILTER = True
 TRAJECTORY_LENGTH = 40
+MAX_TRAJECTORY_SEGMENT_PIXELS = 120
 WINDOW_NAME = "Ball Detection"
 
 
@@ -92,7 +104,32 @@ def is_ball_class(class_id: int, names) -> bool:
     return False
 
 
-def get_ball_detection(result) -> Optional[dict]:
+def is_valid_ball_position(center: Tuple[int, int], frame_shape) -> bool:
+    h, w = frame_shape[:2]
+    cx, cy = center
+
+    min_x = int(w * VALID_X_MIN_RATIO)
+    max_x = int(w * VALID_X_MAX_RATIO)
+    min_y = int(h * VALID_Y_MIN_RATIO)
+    max_y = int(h * VALID_Y_MAX_RATIO)
+
+    return min_x <= cx <= max_x and min_y <= cy <= max_y
+
+
+def is_valid_ball_bbox(bbox: Tuple[int, int, int, int]) -> bool:
+    x1, y1, x2, y2 = bbox
+    bw = max(0, x2 - x1)
+    bh = max(0, y2 - y1)
+    area = bw * bh
+
+    return (
+        bw >= MIN_BALL_BBOX_W
+        and bh >= MIN_BALL_BBOX_H
+        and area >= MIN_BALL_BBOX_AREA
+    )
+
+
+def get_ball_detection(result, frame_shape) -> Optional[dict]:
     if result is None or result.boxes is None:
         return None
 
@@ -106,10 +143,20 @@ def get_ball_detection(result) -> Optional[dict]:
         x1, y1, x2, y2 = [int(v) for v in box.xyxy[0].tolist()]
         cx = int((x1 + x2) / 2)
         cy = int((y1 + y2) / 2)
+        bbox = (x1, y1, x2, y2)
+        center = (cx, cy)
+
+        # valid ball bbox filter
+        if not is_valid_ball_bbox(bbox):
+            continue
+
+        # valid ball position filter
+        if not is_valid_ball_position(center, frame_shape):
+            continue
 
         detection = {
-            "bbox": (x1, y1, x2, y2),
-            "center": (cx, cy),
+            "bbox": bbox,
+            "center": center,
             "confidence": confidence,
         }
 
@@ -134,11 +181,27 @@ def calculate_speed(
     return distance_pixels, velocity_pixels_per_second, velocity_mps, velocity_kmh
 
 
+def pixel_distance(
+    p1: Optional[Tuple[int, int]],
+    p2: Optional[Tuple[int, int]],
+) -> Optional[float]:
+    if p1 is None or p2 is None:
+        return None
+    return math.hypot(p2[0] - p1[0], p2[1] - p1[1])
+
+
 def draw_trajectory(frame, points: Deque[Tuple[int, int]]) -> None:
     if len(points) < 2:
         return
 
     for index in range(1, len(points)):
+        segment_distance = math.hypot(
+            points[index][0] - points[index - 1][0],
+            points[index][1] - points[index - 1][1],
+        )
+        # skip unrealistic trajectory segment
+        if segment_distance > MAX_TRAJECTORY_SEGMENT_PIXELS:
+            continue
         cv2.line(frame, points[index - 1], points[index], (0, 255, 255), 2, cv2.LINE_AA)
 
 
@@ -182,6 +245,8 @@ def main() -> None:
     previous_center: Optional[Tuple[int, int]] = None
     trajectory: Deque[Tuple[int, int]] = deque(maxlen=TRAJECTORY_LENGTH)
     speed_history_kmh: Deque[float] = deque(maxlen=SMOOTHING_WINDOW)
+    stationary_counter = 0
+    last_accepted_center: Optional[Tuple[int, int]] = None
     frame_index = start_frame
 
     print(
@@ -208,12 +273,16 @@ def main() -> None:
             )
 
             annotated = frame.copy()
-            detection = get_ball_detection(results[0] if results else None)
+            detection = get_ball_detection(results[0] if results else None, frame.shape)
             displayed_speed_kmh: Optional[float] = None
 
             if detection is None:
                 previous_center = None
                 speed_history_kmh.clear()
+                # reset trajectory when ball is lost
+                trajectory.clear()
+                stationary_counter = 0
+                last_accepted_center = None
                 cv2.putText(
                     annotated,
                     "Ball: not detected",
@@ -232,8 +301,11 @@ def main() -> None:
                 current_center = (cx, cy)
                 raw_speed_kmh: Optional[float] = None
                 ignored_jump = False
+                ignored_stationary = False
+                ignored_low_speed = False
 
                 if previous_center is not None:
+                    movement_pixels = pixel_distance(previous_center, current_center)
                     _dist_px, _speed_pxps, _speed_mps, raw_speed_kmh = calculate_speed(
                         previous_center,
                         current_center,
@@ -242,15 +314,36 @@ def main() -> None:
                     )
 
                     if raw_speed_kmh <= MAX_SPEED_KMH:
-                        speed_history_kmh.append(raw_speed_kmh)
-                        previous_center = current_center
-                        trajectory.append(current_center)
+                        # stationary false detection filter
+                        if movement_pixels is not None and movement_pixels < MIN_MOVEMENT_PIXELS:
+                            stationary_counter += 1
+                        else:
+                            stationary_counter = 0
+
+                        # minimum speed filter
+                        if stationary_counter >= MAX_STATIONARY_FRAMES:
+                            ignored_stationary = True
+                        elif USE_MIN_SPEED_FILTER and raw_speed_kmh < MIN_VALID_SPEED_KMH:
+                            ignored_low_speed = True
+                        else:
+                            speed_history_kmh.append(raw_speed_kmh)
+                            previous_center = current_center
+                            last_accepted_center = current_center
+                            trajectory.append(current_center)
+                            if movement_pixels is None or movement_pixels >= MIN_MOVEMENT_PIXELS:
+                                stationary_counter = 0
                     else:
                         ignored_jump = True
                         previous_center = None
                         speed_history_kmh.clear()
+                        # reset trajectory after invalid jump
+                        trajectory.clear()
+                        stationary_counter = 0
+                        last_accepted_center = None
                 else:
                     previous_center = current_center
+                    last_accepted_center = current_center
+                    stationary_counter = 0
                     trajectory.append(current_center)
 
                 if speed_history_kmh:
@@ -272,6 +365,18 @@ def main() -> None:
                 if ignored_jump:
                     print(
                         f"frame={frame_index} ball=({cx}, {cy}) speed=IGNORED_OUTLIER "
+                        f"(raw={raw_speed_kmh:.2f} km/h)",
+                        flush=True,
+                    )
+                elif ignored_stationary:
+                    print(
+                        f"frame={frame_index} ball=({cx}, {cy}) speed=IGNORED_STATIONARY "
+                        f"(count={stationary_counter})",
+                        flush=True,
+                    )
+                elif ignored_low_speed:
+                    print(
+                        f"frame={frame_index} ball=({cx}, {cy}) speed=IGNORED_MIN_SPEED "
                         f"(raw={raw_speed_kmh:.2f} km/h)",
                         flush=True,
                     )
