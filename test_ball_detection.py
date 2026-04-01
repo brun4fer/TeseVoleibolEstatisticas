@@ -18,12 +18,12 @@ import torch
 from ultralytics import YOLO
 
 
-MODEL_PATH = Path("runs/detect/train/weights/best.pt")
+MODEL_PATH = Path("runs/detect/train5/weights/best.pt")
 VIDEO_PATH = Path(
     r"C:/Users/Utilizador/Desktop/Mestrado/Tese/VideosJogos/VideoAcademica.mp4"
 )
 
-START_TIME = "00:31:45"
+START_TIME = "00:29:02"
 END_TIME = "00:46:17"
 
 CONF_THRESHOLD = 0.15

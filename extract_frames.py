@@ -2,9 +2,9 @@ import cv2
 import os
 import shutil
 
-VIDEO_PATH = r"C:\Users\Utilizador\Desktop\Mestrado\Tese\VideosJogos\video-2026-02-24T15-06-27.171Z.mp4"
+VIDEO_PATH = r"C:\Users\Utilizador\Desktop\Mestrado\Tese\VideosJogos\VideoAcademica.mp4"
 OUTPUT_DIR = "frames"
-MAX_IMAGES = 500
+MAX_IMAGES = 1000
 
 START_TIME = "00:29:02"
 
