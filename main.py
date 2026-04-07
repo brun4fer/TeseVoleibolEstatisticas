@@ -6,16 +6,12 @@ Loop principal do sistema de análise de voleibol.
 
 import cv2
 import numpy as np
-from typing import Optional, Tuple
 
 from analytics import AnalyticsEngine, draw_sidebar
 from calibration import run_calibration
 from config import config
 from scoreboard_template_reader import ScoreboardReader
 from tracker import VolleyballTracker
-
-
-VALID_SET_VALUES = {0, 1, 2, 3}
 
 
 def draw_players(frame, players):
@@ -102,26 +98,118 @@ def draw_ball_debug_visual(frame, ball_det, ball_state, debug_snapshot):
     )
 
 
+def draw_game_intelligence_debug(frame, context):
+    if not context:
+        return
+    rally_id = int(context.get("current_rally_id", 0))
+    rally_active = "ON" if context.get("rally_active") else "OFF"
+    side = context.get("ball_side") or "--"
+    possession = context.get("possession_side") or "--"
+    team = context.get("possession_team") or "--"
+    quality = context.get("ball_quality") or "--"
+    accepted_stats = "ok" if context.get("ball_accepted_for_stats") else "hold"
+    crossings = int(context.get("rally_net_crossings", 0))
+    direction = context.get("last_net_crossing_direction") or "--"
+    reasons = context.get("reasons") or []
+    reason_txt = ";".join(str(r) for r in reasons) if reasons else "ok"
+    if len(reason_txt) > 80:
+        reason_txt = reason_txt[:77] + "..."
+
+    events = context.get("events") or []
+    last_event = events[-1].get("event_type", "--") if events and isinstance(events[-1], dict) else "--"
+    y0 = 292
+    cv2.putText(
+        frame,
+        f"Rules | rally={rally_id}:{rally_active} | side={side} | poss={possession}/{team} | net={crossings} {direction}",
+        (20, y0),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.52,
+        (255, 220, 0),
+        2,
+        cv2.LINE_AA,
+    )
+    cv2.putText(
+        frame,
+        f"Rules ball={quality}:{accepted_stats} | event={last_event} | {reason_txt}",
+        (20, y0 + 22),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.52,
+        (255, 220, 0),
+        2,
+        cv2.LINE_AA,
+    )
+
+
 def draw_ocr_roi_debug(frame, roi):
     x, y, w, h = roi
     cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
 
 
-def validate_score(
-    prev_score: Optional[Tuple[int, int, int, int]],
-    new_score: Tuple[int, int, int, int],
-) -> Tuple[int, int, int, int]:
-    sets_a, points_a, sets_b, points_b = new_score
+def scoreboard_safe_text_pos(frame, roi, line_idx: int):
+    x, y, w, h = roi
+    right_x = int(x + w + 20)
+    if right_x <= frame.shape[1] - 520:
+        return right_x, int(y + 24 + (line_idx * 24))
+    return int(x), int(y + h + 30 + (line_idx * 24))
 
-    prev_sets_a = prev_score[0] if prev_score is not None else 0
-    prev_sets_b = prev_score[2] if prev_score is not None else 0
 
-    if sets_a not in VALID_SET_VALUES:
-        sets_a = prev_sets_a
-    if sets_b not in VALID_SET_VALUES:
-        sets_b = prev_sets_b
+def _score_points_text(score):
+    if score is None:
+        return "--"
+    return f"{score[1]}-{score[3]}"
 
-    return (sets_a, points_a, sets_b, points_b)
+
+def draw_scoreboard_debug(frame, snapshot, roi):
+    if not snapshot:
+        return
+    raw = snapshot.get("raw_score")
+    confirmed = snapshot.get("confirmed_score")
+    reference = snapshot.get("reference_score")
+    pending = snapshot.get("pending_score")
+    status = snapshot.get("status") or "--"
+    rejected = snapshot.get("rejected_score")
+    reject_reason = snapshot.get("reject_reason") or "--"
+    confidence = float(snapshot.get("vote_confidence") or 0.0)
+    match_score = float(snapshot.get("reader_match_score") or 0.0)
+    pending_hits = int(snapshot.get("pending_hits") or 0)
+    confirm_reads = int(snapshot.get("change_confirm_reads") or 0)
+    changed = bool(snapshot.get("score_just_updated") or snapshot.get("score_changed"))
+
+    color = (0, 255, 0) if changed else (255, 255, 255)
+    line0 = scoreboard_safe_text_pos(frame, roi, 0)
+    cv2.putText(
+        frame,
+        f"Placar Ref: {_score_points_text(reference)} | Conf: {_score_points_text(confirmed)} | Raw: {_score_points_text(raw)}",
+        line0,
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.6,
+        color,
+        2,
+        cv2.LINE_AA,
+    )
+    line1 = scoreboard_safe_text_pos(frame, roi, 1)
+    cv2.putText(
+        frame,
+        f"Scoreboard {status} | pending={_score_points_text(pending)} {pending_hits}/{confirm_reads} | vote={confidence:.2f} | match={match_score:.2f}",
+        line1,
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.52,
+        (255, 255, 0),
+        2,
+        cv2.LINE_AA,
+    )
+    if rejected is not None:
+        line2 = scoreboard_safe_text_pos(frame, roi, 2)
+        cv2.putText(
+            frame,
+            f"Scoreboard rejected {_score_points_text(rejected)} | {reject_reason}",
+            line2,
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.52,
+            (0, 165, 255),
+            2,
+            cv2.LINE_AA,
+        )
 
 
 def main():
@@ -146,17 +234,6 @@ def main():
         raise RuntimeError("Nao foi possivel ler o primeiro frame do video.")
 
     config.score_roi = tuple(reader.set_roi(first_frame))
-    raw_read = reader.read
-    prev_score = validate_score(None, raw_read(first_frame))
-
-    def validated_read(frame):
-        nonlocal prev_score
-        raw_score = raw_read(frame)
-        score = validate_score(prev_score, raw_score)
-        prev_score = score
-        return score
-
-    reader.read = validated_read
     cap.set(cv2.CAP_PROP_POS_FRAMES, start_f)
 
     analytics = AnalyticsEngine(reader)
@@ -174,9 +251,10 @@ def main():
             frame_idx += 1
             continue
 
+        scoreboard_frame = frame.copy()
         ts = frame_idx / fps
-        detections = tracker.detect(frame, timestamp_s=ts, fps=fps)
-        ball_state = tracker.update_ball(detections["ball_det"], timestamp_s=ts)
+        detections = tracker.detect(frame, timestamp_s=ts, fps=fps, frame_idx=frame_idx)
+        ball_state = tracker.update_ball(detections["ball_det"], timestamp_s=ts, frame_idx=frame_idx)
 
         rally_finished, ptype = analytics.process_frame(
             frame=frame,
@@ -185,6 +263,7 @@ def main():
             ball_state=ball_state,
             players=detections["players"],
             tracker=tracker,
+            scoreboard_frame=scoreboard_frame,
         )
 
         if rally_finished:
@@ -208,63 +287,47 @@ def main():
             )
             if getattr(config, "BALL_DEBUG_VISUAL", False):
                 draw_ball_debug_visual(frame, detections["ball_det"], ball_state, ball_debug)
+            if getattr(config, "GAME_RULES_DEBUG_VISUAL", False):
+                draw_game_intelligence_debug(frame, tracker.game_context_snapshot())
             draw_sidebar(frame, analytics.rally_mgr, analytics.counts, analytics.rally_counter)
-            if analytics.prev_score is not None:
-                _a_set, a_pts, _b_set, b_pts = analytics.prev_score
-                placar_color = (0, 255, 0) if getattr(analytics, "score_just_updated", False) else (255, 255, 255)
-                cv2.putText(
-                    frame,
-                    f"Placar Ref: {a_pts}-{b_pts}",
-                    (20, 164),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.65,
-                    placar_color,
-                    2,
-                )
-                if getattr(analytics, "score_just_updated", False):
-                    cv2.putText(
-                        frame,
-                        "Placar Ref atualizado",
-                        (20, 190),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.6,
-                        (0, 255, 0),
-                        2,
-                    )
-            ocr_stable = getattr(analytics, "last_ocr_score_stable", None)
-            ocr_raw = getattr(analytics, "last_ocr_score_raw", None)
-            if ocr_stable is not None:
-                cv2.putText(
-                    frame,
-                    f"OCR Stable: {ocr_stable[1]}-{ocr_stable[3]}",
-                    (20, 216),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.55,
-                    (255, 255, 0),
-                    2,
-                )
-            if ocr_raw is not None:
-                cv2.putText(
-                    frame,
-                    f"OCR Raw: {ocr_raw[1]}-{ocr_raw[3]}",
-                    (20, 240),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.55,
-                    (0, 255, 255),
-                    2,
-                )
+            if getattr(config, "SCOREBOARD_DEBUG_VISUAL", False):
+                draw_scoreboard_debug(frame, analytics.scoreboard_snapshot(), config.score_roi)
 
             # ROI do marcador em verde (debug OCR)
             draw_ocr_roi_debug(frame, config.score_roi)
 
             # info dispositivo
-            cv2.putText(frame, f"Device: {tracker.device.upper()}", (20, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
+            cv2.putText(
+                frame,
+                f"Device: {tracker.device.upper()}",
+                scoreboard_safe_text_pos(frame, config.score_roi, 3),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.7,
+                (255, 255, 0),
+                2,
+            )
             cooldown_left = max(0.0, (analytics.last_point_time + analytics.point_cooldown_s) - ts)
             if cooldown_left > 0.0:
-                cv2.putText(frame, f"Cooldown: {cooldown_left:.1f}s", (20, 112), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 165, 255), 2)
+                cv2.putText(
+                    frame,
+                    f"Cooldown: {cooldown_left:.1f}s",
+                    scoreboard_safe_text_pos(frame, config.score_roi, 4),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.65,
+                    (0, 165, 255),
+                    2,
+                )
             ocr_lock_left = max(0.0, analytics.ocr_blocked_until - ts)
             if ocr_lock_left > 0.0:
-                cv2.putText(frame, f"OCR Lock: {ocr_lock_left:.1f}s", (20, 138), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 0, 255), 2)
+                cv2.putText(
+                    frame,
+                    f"OCR Lock: {ocr_lock_left:.1f}s",
+                    scoreboard_safe_text_pos(frame, config.score_roi, 5),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.65,
+                    (0, 0, 255),
+                    2,
+                )
 
             cv2.imshow("Voleibol - Analytics", frame)
             key = cv2.waitKey(1) & 0xFF

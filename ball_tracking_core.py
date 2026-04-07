@@ -13,7 +13,7 @@ from __future__ import annotations
 from collections import deque
 from dataclasses import dataclass, field
 import math
-from typing import Deque, Dict, List, Optional, Tuple
+from typing import Callable, Deque, Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -525,6 +525,7 @@ class BallTrackerCore:
         fg_mask,
         fps: float,
         pixels_per_meter: Optional[float] = None,
+        context_evaluator: Optional[Callable[[Dict], Dict]] = None,
     ) -> BallTrackResult:
         cfg = self.cfg
         ppm = cfg.pixels_per_meter if pixels_per_meter is None else float(pixels_per_meter)
@@ -536,13 +537,25 @@ class BallTrackerCore:
             self.older_center,
             cfg,
         )
+        context_decision: Optional[Dict] = None
+        context_rejected_candidate: Optional[Dict] = None
+        if detection is not None and context_evaluator is not None:
+            context_decision = context_evaluator(detection)
+            if context_decision:
+                detection["game_context"] = dict(context_decision)
+                candidate_stats["game_context"] = dict(context_decision)
+                if bool(context_decision.get("reject", False)):
+                    context_rejected_candidate = dict(detection)
+                    reason = str(context_decision.get("reason") or "context_rejected")
+                    selection_reason = f"{selection_reason}|game_context_rejected:{reason}"
+                    detection = None
         foreground_reason = ""
         if detection is not None and not candidate_stats["foreground_filter_active"]:
             foreground_reason = "selected_without_foreground_filter"
         elif detection is not None:
             foreground_reason = "selected_with_foreground"
 
-        selected_candidate = dict(detection) if detection is not None else None
+        selected_candidate = dict(detection) if detection is not None else context_rejected_candidate
         accepted_detection: Optional[Dict] = None
         accepted_center: Optional[Tuple[int, int]] = None
         displayed_speed_kmh: Optional[float] = None
@@ -621,6 +634,8 @@ class BallTrackerCore:
 
         if selected_candidate is not None:
             selected_candidate["track_state"] = ball_track_state
+            if context_decision is not None:
+                selected_candidate["game_context"] = dict(context_decision)
         if accepted_detection is not None:
             accepted_detection["track_state"] = TRACK_OBSERVED
             accepted_detection["accepted_ball_center"] = accepted_center
@@ -658,6 +673,7 @@ class BallTrackerCore:
                 "predicted_before": predicted_before,
                 "predicted_after": predicted_after,
                 "candidate_debug": candidate_debug_string(selected_candidate) if selected_candidate is not None else None,
+                "game_context": dict(context_decision) if context_decision is not None else None,
             },
         )
         self.last_result = result_obj

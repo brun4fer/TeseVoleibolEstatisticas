@@ -18,7 +18,7 @@ class Config:
     calibration_dir: Path = Path("calibration")
 
     # Time window (absolute timestamps in the video)
-    start_ts: str = "00:29:02"
+    start_ts: str = "00:27:02"
     end_ts: str = "00:46:17"
 
     # Models
@@ -61,6 +61,17 @@ class Config:
     # Scoreboard ROI (x, y, w, h) in pixels relative to full frame
     score_roi: Tuple[int, int, int, int] = (25, 45, 340, 150)
     ocr_every_n_frames: int = 15
+    SCOREBOARD_DEBUG_VISUAL: bool = True
+    SCOREBOARD_DEBUG_WINDOW: bool = False
+    SCOREBOARD_DEBUG_CLEAN_ROI_WINDOW: bool = False
+    SCOREBOARD_DEBUG_PREPROCESSED_WINDOW: bool = False
+    SCOREBOARD_DEBUG_LOG: bool = False
+    scoreboard_vote_window_reads: int = 5
+    scoreboard_vote_min_hits: int = 3
+    scoreboard_initial_confirm_reads: int = 2
+    scoreboard_change_confirm_reads: int = 2
+    scoreboard_valid_set_values: Tuple[int, ...] = (0, 1, 2, 3, 4, 5)
+    scoreboard_max_points_value: int = 60
 
     # Kalman noise params
     process_noise: float = 1e-2
@@ -75,6 +86,32 @@ class Config:
     ball_pixels_per_meter: float = 50.0
     ball_debug_trajectory_length: int = 40
     ball_debug_max_segment_px: float = 120.0
+
+    # Volleyball game-intelligence layer
+    GAME_RULES_ENABLED: bool = True
+    GAME_RULES_VALIDATE_BALL: bool = True
+    GAME_RULES_SUPPRESS_DUBIOUS_BALL_FOR_ANALYTICS: bool = True
+    GAME_RULES_DEBUG_VISUAL: bool = True
+    GAME_RULES_DEBUG_LOG: bool = False
+    game_net_neutral_px: float = 15.0
+    game_net_cross_tolerance_px: float = 80.0
+    game_net_cross_confirm_frames: int = 3
+    game_ball_max_step_px: float = 260.0
+    game_ball_missing_step_allowance_px: float = 35.0
+    game_ball_max_missing_grace_frames: int = 8
+    game_ball_teleport_net_tolerance_px: float = 130.0
+    game_ball_abrupt_turn_cos: float = -0.88
+    game_ball_abrupt_turn_min_step_px: float = 45.0
+    game_ball_abrupt_turn_net_grace_px: float = 140.0
+    game_ball_stats_penalty_threshold: float = 45.0
+    game_ball_reject_penalty_threshold: float = 100.0
+    game_ball_large_step_near_net_penalty: float = 55.0
+    game_ball_impossible_step_penalty: float = 120.0
+    game_ball_side_teleport_penalty: float = 120.0
+    game_ball_abrupt_turn_penalty: float = 45.0
+    game_possession_confirm_frames: int = 3
+    game_rally_lost_confirm_s: float = 1.0
+    game_score_confirm_window_s: float = 2.0
 
     def video_path(self) -> Path:
         return self.videos_dir / self.video_file

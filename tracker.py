@@ -34,6 +34,7 @@ from ball_tracking_core import (
 )
 from calibration import pixel_to_court
 from config import config
+from volleyball_rules import VolleyballGameIntelligence, VolleyballRulesConfig
 
 # Relevant COCO classes
 CLASS_PERSON = 0
@@ -51,6 +52,12 @@ class BallState:
     track_state: str = TRACK_LOST
     accepted_ball_center: Optional[Tuple[float, float]] = None
     predicted_ball_center: Optional[Tuple[float, float]] = None
+    ball_side: Optional[str] = None
+    possession_side: Optional[str] = None
+    possession_team: Optional[str] = None
+    ball_quality: str = "lost"
+    ball_accepted_for_stats: bool = False
+    game_context: Optional[Dict] = None
 
 
 class BallKalman:
@@ -131,6 +138,11 @@ class VolleyballTracker:
                 max_trajectory_segment_pixels=float(getattr(config, "ball_debug_max_segment_px", 120.0)),
             )
         )
+        self.game_intelligence = VolleyballGameIntelligence(
+            self.net_line,
+            VolleyballRulesConfig.from_config(config),
+        )
+        self.last_game_context: Dict = self.game_intelligence.context_snapshot()
         self.ball_frame_scale_x: float = 1.0
         self.ball_frame_scale_y: float = 1.0
         self.last_ball_core_result = None
@@ -197,7 +209,13 @@ class VolleyballTracker:
             return True
         return int(cls) == CLASS_PERSON and "ball" not in name
 
-    def detect(self, frame, timestamp_s: Optional[float] = None, fps: Optional[float] = None) -> Dict:
+    def detect(
+        self,
+        frame,
+        timestamp_s: Optional[float] = None,
+        fps: Optional[float] = None,
+        frame_idx: Optional[int] = None,
+    ) -> Dict:
         """Run the same ball decision pipeline used by test_ball_detection.py."""
         ball_frame, scale_x, scale_y = resize_frame_with_scale(frame, self.ball_core.cfg.resize_width)
         self.ball_frame_scale_x = float(scale_x)
@@ -214,12 +232,21 @@ class VolleyballTracker:
         )
         res = results[0] if results else None
         fps_value = float(fps) if fps is not None and fps > 0 else 30.0
+        context_evaluator = None
+        if getattr(self.game_intelligence.cfg, "enabled", True) and getattr(self.game_intelligence.cfg, "validate_ball_candidates", True):
+            def context_evaluator(candidate: Dict) -> Dict:
+                scaled_candidate = scale_detection(candidate, scale_x, scale_y)
+                center = scaled_candidate.get("center") if scaled_candidate is not None else None
+                decision = self.game_intelligence.evaluate_candidate(center, timestamp_s, frame_idx)
+                return decision.to_dict()
+
         core_result = self.ball_core.update_from_yolo_result(
             res,
             ball_frame.shape,
             fg_mask,
             fps=fps_value,
             pixels_per_meter=self.ball_core.cfg.pixels_per_meter,
+            context_evaluator=context_evaluator,
         )
         self.last_ball_core_result = core_result
 
@@ -245,6 +272,7 @@ class VolleyballTracker:
         accepted_det = scale_detection(core_result.accepted_detection, scale_x, scale_y)
         predicted_center = scale_point(core_result.predicted_ball_center, scale_x, scale_y)
         if accepted_det is not None:
+            game_context_decision = dict(core_result.debug.get("game_context") or {})
             accepted_det["conf"] = float(accepted_det.get("confidence", 0.0))
             accepted_det["visible"] = True
             accepted_det["track_state"] = TRACK_OBSERVED
@@ -252,6 +280,7 @@ class VolleyballTracker:
             accepted_det["predicted_ball_center"] = predicted_center
             accepted_det["selection_reason"] = core_result.selection_reason
             accepted_det["foreground_reason"] = core_result.foreground_reason
+            accepted_det["game_context_decision"] = game_context_decision
             accepted_det["ball_core_debug"] = dict(core_result.debug)
             now_t = float(timestamp_s) if timestamp_s is not None else float(time.time())
             self._infill_ball_drawer_gap_if_needed(float(accepted_det["center"][0]), float(accepted_det["center"][1]), now_t)
@@ -273,6 +302,7 @@ class VolleyballTracker:
                 "predicted_ball_center": predicted_center,
                 "selection_reason": core_result.selection_reason,
                 "foreground_reason": core_result.foreground_reason,
+                "game_context_decision": dict(core_result.debug.get("game_context") or {}),
                 "ball_core_debug": dict(core_result.debug),
             }
             if core_result.ball_track_state == TRACK_LOST:
@@ -299,14 +329,27 @@ class VolleyballTracker:
             pred = selected.get("prediction_error")
             pred_txt = f"{float(pred):.2f}" if pred is not None else "--"
             fg_txt = f"{int(selected.get('fg_active_pixels', 0))}/{float(selected.get('fg_active_ratio', 0.0)):.2f}"
+        game_decision = core_result.debug.get("game_context") if core_result is not None else None
+        game_reason = ""
+        if game_decision:
+            game_reason = (
+                f" game={game_decision.get('quality')} "
+                f"penalty={float(game_decision.get('penalty', 0.0)):.1f} "
+                f"greason={game_decision.get('reason')}"
+            )
         ts_txt = "--" if timestamp_s is None else f"{float(timestamp_s):.2f}"
         return (
             f"[BALL-CORE] ts={ts_txt} state={core_result.ball_track_state} "
             f"center={center_txt} conf={conf_txt} score={score_txt} pred_err={pred_txt} "
-            f"fg={fg_txt} reason={core_result.selection_reason} missed={core_result.missed_frames}"
+            f"fg={fg_txt} reason={core_result.selection_reason} missed={core_result.missed_frames}{game_reason}"
         )
 
-    def update_ball(self, ball_det: Optional[Dict], timestamp_s: Optional[float] = None) -> BallState:
+    def update_ball(
+        self,
+        ball_det: Optional[Dict],
+        timestamp_s: Optional[float] = None,
+        frame_idx: Optional[int] = None,
+    ) -> BallState:
         ball_visible = bool(ball_det is not None and bool(ball_det.get("visible", False)))
         meas = ball_det["center"] if ball_visible else None
         track_state = str(ball_det.get("track_state", TRACK_OBSERVED if ball_visible else TRACK_LOST)) if ball_det is not None else TRACK_LOST
@@ -347,7 +390,7 @@ class VolleyballTracker:
         speed_px = self._instant_speed()
         court_xy = pixel_to_court(self.H, (x, y))
         vx, vy = self._last_velocity()
-        return BallState(
+        state = BallState(
             pixel=(x, y),
             court=court_xy,
             speed_px=speed_px,
@@ -358,6 +401,24 @@ class VolleyballTracker:
             accepted_ball_center=accepted_ball_center,
             predicted_ball_center=predicted_ball_center,
         )
+        if getattr(self.game_intelligence.cfg, "enabled", True):
+            context = self.game_intelligence.update_ball(
+                state,
+                timestamp_s=float(timestamp_s) if timestamp_s is not None else 0.0,
+                frame_idx=int(frame_idx) if frame_idx is not None else len(self.trail),
+            )
+            context_dict = context.to_dict()
+            self.last_game_context = context_dict
+            state.ball_side = context.ball_side
+            state.possession_side = context.possession_side
+            state.possession_team = context.possession_team
+            state.ball_quality = context.ball_quality
+            state.ball_accepted_for_stats = context.ball_accepted_for_stats
+            state.game_context = context_dict
+        else:
+            state.ball_quality = "trusted" if ball_visible else "lost"
+            state.ball_accepted_for_stats = bool(ball_visible)
+        return state
 
     def _append_ball_drawer(self, x: float, y: float, t: float) -> None:
         if abs(float(x)) < 1e-6 and abs(float(y)) < 1e-6:
@@ -480,8 +541,27 @@ class VolleyballTracker:
             "current_det": dict(self.current_ball_det) if self.current_ball_det is not None else None,
             "trajectory": self.accepted_ball_points(),
             "quality": quality,
+            "game_context": self.game_context_snapshot(),
             "max_segment_px": float(self.ball_core.cfg.max_trajectory_segment_pixels * max(self.ball_frame_scale_x, self.ball_frame_scale_y)),
         }
+
+    def game_context_snapshot(self) -> Dict:
+        return dict(self.last_game_context) if self.last_game_context is not None else self.game_intelligence.context_snapshot()
+
+    def note_score_change(
+        self,
+        prev_score: Optional[Tuple[int, int, int, int]],
+        new_score: Optional[Tuple[int, int, int, int]],
+        timestamp_s: float,
+        frame_idx: int,
+    ) -> None:
+        self.game_intelligence.confirm_score_change(
+            prev_score=prev_score,
+            new_score=new_score,
+            timestamp_s=float(timestamp_s),
+            frame_idx=int(frame_idx),
+        )
+        self.last_game_context = self.game_intelligence.context_snapshot()
 
     def clear_ball_drawer(self) -> None:
         self.ball_drawer.clear()
@@ -490,6 +570,8 @@ class VolleyballTracker:
         self.tocou_rede = False
         self.current_ball_det = None
         self.ball_core.reset()
+        self.game_intelligence.reset_for_new_rally()
+        self.last_game_context = self.game_intelligence.context_snapshot()
 
     def reset_drawer_for_service(self, x: float, y: float, t: float) -> None:
         self.clear_ball_drawer()

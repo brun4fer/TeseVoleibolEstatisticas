@@ -10,7 +10,7 @@ Rally event/statistics engine for volleyball.
 from __future__ import annotations
 
 from collections import Counter, deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Deque, Dict, List, Optional, Tuple
 
 import cv2
@@ -26,12 +26,51 @@ class ScoreboardOCR:
     def __init__(self, reader: ScoreboardReader):
         self.reader = reader
         self.stable_score: Optional[Tuple[int, int, int, int]] = None
+        self.previous_stable_score: Optional[Tuple[int, int, int, int]] = None
         self.last_raw_score: Optional[Tuple[int, int, int, int]] = None
+        self.last_normalized_score: Optional[Tuple[int, int, int, int]] = None
         self.last_returned_score: Optional[Tuple[int, int, int, int]] = None
         self.last_read_discarded: bool = False
-        self.vote_window: Deque[Tuple[int, int, int, int]] = deque(maxlen=5)
-        self.vote_min_hits: int = 3
+        self.vote_window: Deque[Tuple[int, int, int, int]] = deque(
+            maxlen=int(getattr(config, "scoreboard_vote_window_reads", 5))
+        )
+        self.vote_min_hits: int = int(getattr(config, "scoreboard_vote_min_hits", 3))
+        self.change_confirm_reads: int = int(getattr(config, "scoreboard_change_confirm_reads", 2))
+        self.initial_confirm_reads: int = int(getattr(config, "scoreboard_initial_confirm_reads", 2))
+        self.max_points_value: int = int(getattr(config, "scoreboard_max_points_value", 60))
+        self.valid_set_values = set(getattr(config, "scoreboard_valid_set_values", (0, 1, 2, 3, 4, 5)))
+        self.pending_candidate: Optional[Tuple[int, int, int, int]] = None
+        self.pending_candidate_hits: int = 0
+        self.last_pending_score: Optional[Tuple[int, int, int, int]] = None
+        self.last_rejected_score: Optional[Tuple[int, int, int, int]] = None
+        self.last_reject_reason: Optional[str] = None
+        self.last_status: str = "init"
+        self.score_changed: bool = False
+        self.last_change_frame: Optional[int] = None
+        self.last_change_ts: Optional[float] = None
+        self.last_clean_roi: Optional[np.ndarray] = None
+        self.last_preprocessed_debug: Optional[np.ndarray] = None
         self.old_formatted: Optional[str] = None
+
+    def _normalize_score(
+        self,
+        raw_score: Optional[Tuple[int, int, int, int]],
+    ) -> Optional[Tuple[int, int, int, int]]:
+        if raw_score is None or len(raw_score) != 4:
+            self.last_reject_reason = "empty_or_malformed"
+            return None
+
+        sets_a, points_a, sets_b, points_b = [int(v) for v in raw_score]
+        reference = self.stable_score or self.previous_stable_score
+        if sets_a not in self.valid_set_values:
+            sets_a = int(reference[0]) if reference is not None else 0
+        if sets_b not in self.valid_set_values:
+            sets_b = int(reference[2]) if reference is not None else 0
+        if not (0 <= points_a <= self.max_points_value and 0 <= points_b <= self.max_points_value):
+            self.last_reject_reason = "points_out_of_range"
+            return None
+        self.last_reject_reason = None
+        return sets_a, points_a, sets_b, points_b
 
     def _is_plausible_step(
         self,
@@ -64,39 +103,208 @@ class ScoreboardOCR:
             return True
         return False
 
-    def read(self, frame) -> Optional[Tuple[int, int, int, int]]:
-        if not getattr(config, "HEADLESS_MODE", False):
+    def _is_logical_plus_one(
+        self,
+        prev_score: Optional[Tuple[int, int, int, int]],
+        new_score: Optional[Tuple[int, int, int, int]],
+    ) -> bool:
+        if prev_score is None or new_score is None or prev_score == new_score:
+            return False
+        prev_a_set, prev_a_pts, prev_b_set, prev_b_pts = prev_score
+        new_a_set, new_a_pts, new_b_set, new_b_pts = new_score
+        if prev_a_set != new_a_set or prev_b_set != new_b_set:
+            return False
+        da = int(new_a_pts) - int(prev_a_pts)
+        db = int(new_b_pts) - int(prev_b_pts)
+        return (da == 1 and db == 0) or (da == 0 and db == 1)
+
+    def _confirm_score(
+        self,
+        score: Tuple[int, int, int, int],
+        frame_idx: Optional[int],
+        timestamp_s: Optional[float],
+        status: str,
+    ) -> None:
+        changed = self.stable_score is not None and score != self.stable_score
+        self.previous_stable_score = self.stable_score
+        self.stable_score = score
+        self.score_changed = bool(changed)
+        self.last_status = status
+        if changed:
+            self.last_change_frame = int(frame_idx) if frame_idx is not None else None
+            self.last_change_ts = float(timestamp_s) if timestamp_s is not None else None
+        self.pending_candidate = None
+        self.pending_candidate_hits = 0
+        self.last_pending_score = None
+        self.vote_window.clear()
+        self.vote_window.append(score)
+        set_num = score[0] + score[2] + 1
+        formatted = f"SET {set_num} ({score[1]}-{score[3]})"
+        if formatted != self.old_formatted:
+            print(formatted)
+            self.old_formatted = formatted
+
+    def _finish_read(self) -> Optional[Tuple[int, int, int, int]]:
+        self.last_returned_score = self.stable_score
+        if getattr(config, "SCOREBOARD_DEBUG_LOG", False):
+            print(
+                f"[SCOREBOARD] raw={self.last_raw_score} confirmed={self.stable_score} "
+                f"pending={self.last_pending_score} status={self.last_status} "
+                f"reject={self.last_reject_reason}"
+            )
+        return self.stable_score
+
+    def _update_debug_images(self, frame) -> None:
+        self.last_clean_roi = None
+        self.last_preprocessed_debug = None
+        if self.reader.roi is not None:
+            x, y, w, h = self.reader.roi
+            roi = frame[y : y + h, x : x + w]
+            if roi.size > 0:
+                self.last_clean_roi = roi.copy()
+
+        debug_info = getattr(self.reader, "last_debug_info", None)
+        if not debug_info:
+            return
+        panels = []
+        for name, (_cropped_digit, processed, score) in debug_info.items():
+            img = processed
+            if img is None or img.size == 0:
+                continue
+            if len(img.shape) == 2:
+                panel = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+            else:
+                panel = img.copy()
+            panel = cv2.resize(panel, (70, 70), interpolation=cv2.INTER_NEAREST)
+            cv2.putText(
+                panel,
+                f"{name[:3]} {float(score):.2f}",
+                (3, 12),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.32,
+                (0, 255, 0),
+                1,
+                cv2.LINE_AA,
+            )
+            panels.append(panel)
+        if panels:
+            self.last_preprocessed_debug = np.hstack(panels)
+
+    def read(
+        self,
+        frame,
+        frame_idx: Optional[int] = None,
+        timestamp_s: Optional[float] = None,
+    ) -> Optional[Tuple[int, int, int, int]]:
+        self.score_changed = False
+        self.last_read_discarded = False
+        self.last_rejected_score = None
+        self.last_reject_reason = None
+        if self.reader.roi is not None:
+            x, y, w, h = self.reader.roi
+            roi = frame[y : y + h, x : x + w]
+            self.last_clean_roi = roi.copy() if roi.size > 0 else None
+        else:
+            self.last_clean_roi = None
+
+        if not getattr(config, "HEADLESS_MODE", False) and getattr(config, "SCOREBOARD_DEBUG_WINDOW", False):
             dbg = frame.copy()
             if self.reader.roi is not None:
                 x, y, w, h = self.reader.roi
                 cv2.rectangle(dbg, (x, y), (x + w, y + h), (0, 255, 0), 2)
             cv2.imshow("DEBUG_OCR_ROI", dbg)
         parsed_raw = self.reader.read(frame)
+        self._update_debug_images(frame)
+        if not getattr(config, "HEADLESS_MODE", False):
+            if getattr(config, "SCOREBOARD_DEBUG_CLEAN_ROI_WINDOW", False) and self.last_clean_roi is not None:
+                cv2.imshow("SCOREBOARD_CLEAN_ROI_USED", self.last_clean_roi)
+            if getattr(config, "SCOREBOARD_DEBUG_PREPROCESSED_WINDOW", False) and self.last_preprocessed_debug is not None:
+                cv2.imshow("SCOREBOARD_PREPROCESSED_USED", self.last_preprocessed_debug)
         self.last_raw_score = parsed_raw
-        parsed = parsed_raw
-        discard_candidate = False
-        if not self._is_plausible_step(self.stable_score, parsed):
-            # Keep previous stable reading when OCR suggests impossible transitions.
-            if self.stable_score is not None:
-                parsed = self.stable_score
-            else:
-                discard_candidate = True
-        self.last_read_discarded = bool(discard_candidate)
+        parsed = self._normalize_score(parsed_raw)
+        self.last_normalized_score = parsed
+        if parsed is None:
+            self.last_read_discarded = True
+            self.last_rejected_score = parsed_raw
+            self.last_status = f"rejected:{self.last_reject_reason or 'invalid'}"
+            return self._finish_read()
 
-        if not discard_candidate:
-            self.vote_window.append(parsed)
+        if not self._is_plausible_step(self.stable_score, parsed):
+            self.last_read_discarded = True
+            self.last_rejected_score = parsed
+            self.last_reject_reason = "implausible_step"
+            self.last_status = "rejected:implausible_step"
+            return self._finish_read()
+
+        self.vote_window.append(parsed)
+        if self.stable_score is None:
+            most_common_score, hits = Counter(self.vote_window).most_common(1)[0]
+            if hits >= self.initial_confirm_reads:
+                self._confirm_score(most_common_score, frame_idx, timestamp_s, status="initialized")
+            else:
+                self.last_status = f"initial_pending:{hits}/{self.initial_confirm_reads}"
+            return self._finish_read()
+
+        if parsed == self.stable_score:
+            self.pending_candidate = None
+            self.pending_candidate_hits = 0
+            self.last_pending_score = None
+            self.last_status = "stable"
+            return self._finish_read()
+
+        if not self._is_logical_plus_one(self.stable_score, parsed):
+            self.last_read_discarded = True
+            self.last_rejected_score = parsed
+            self.last_reject_reason = "not_single_point_progression"
+            self.last_status = "rejected:not_single_point_progression"
+            return self._finish_read()
+
+        if self.pending_candidate == parsed:
+            self.pending_candidate_hits += 1
+        else:
+            self.pending_candidate = parsed
+            self.pending_candidate_hits = 1
+        self.last_pending_score = parsed
+        self.last_status = f"pending:{self.pending_candidate_hits}/{self.change_confirm_reads}"
+        if self.pending_candidate_hits >= self.change_confirm_reads:
+            self._confirm_score(parsed, frame_idx, timestamp_s, status="confirmed_change")
+
         if len(self.vote_window) == self.vote_window.maxlen:
             most_common_score, hits = Counter(self.vote_window).most_common(1)[0]
-            if hits >= self.vote_min_hits and self.stable_score != most_common_score:
-                self.stable_score = most_common_score
-                set_num = most_common_score[0] + most_common_score[2] + 1
-                formatted = f"SET {set_num} ({most_common_score[1]}-{most_common_score[3]})"
-                if formatted != self.old_formatted:
-                    print(formatted)
-                    self.old_formatted = formatted
+            if (
+                hits >= self.vote_min_hits
+                and self.stable_score != most_common_score
+                and self._is_logical_plus_one(self.stable_score, most_common_score)
+            ):
+                self._confirm_score(most_common_score, frame_idx, timestamp_s, status="confirmed_vote")
 
-        self.last_returned_score = self.stable_score
-        return self.stable_score
+        return self._finish_read()
+
+    def snapshot(self) -> Dict:
+        confidence = 0.0
+        if self.vote_window:
+            _score, hits = Counter(self.vote_window).most_common(1)[0]
+            confidence = float(hits) / float(len(self.vote_window))
+        return {
+            "raw_score": self.last_raw_score,
+            "normalized_score": self.last_normalized_score,
+            "confirmed_score": self.stable_score,
+            "previous_confirmed_score": self.previous_stable_score,
+            "pending_score": self.last_pending_score,
+            "pending_hits": self.pending_candidate_hits,
+            "change_confirm_reads": self.change_confirm_reads,
+            "score_changed": self.score_changed,
+            "last_change_frame": self.last_change_frame,
+            "last_change_ts": self.last_change_ts,
+            "discarded": self.last_read_discarded,
+            "rejected_score": self.last_rejected_score,
+            "reject_reason": self.last_reject_reason,
+            "status": self.last_status,
+            "reader_match_score": float(getattr(self.reader, "last_total_score", 0.0)),
+            "vote_confidence": confidence,
+            "roi_used": self.reader.roi,
+            "clean_roi_shape": tuple(self.last_clean_roi.shape) if self.last_clean_roi is not None else None,
+        }
 
 
 # -------------------------- RALLY STATE -----------------------------
@@ -421,6 +629,18 @@ class AnalyticsEngine:
     @toucou_rede.setter
     def toucou_rede(self, value: bool) -> None:
         self.tocou_rede = bool(value)
+
+    def scoreboard_snapshot(self) -> Dict:
+        snapshot = self.ocr.snapshot()
+        snapshot.update(
+            {
+                "reference_score": self.prev_score,
+                "pending_score_change": self.pending_score_change,
+                "pending_score_change_ts": self.pending_score_change_ts,
+                "score_just_updated": self.score_just_updated,
+            }
+        )
+        return snapshot
 
     def _winner_from_score_change(
         self,
@@ -778,6 +998,13 @@ class AnalyticsEngine:
         x_min, y_min, x_max, y_max = self._block_zone_rect(tracker)
         cv2.rectangle(frame, (x_min, y_min), (x_max, y_max), (0, 255, 255), 2)
         cv2.putText(frame, "ZONE_BLOCK", (x_min, max(20, y_min - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
+
+    def _scoreboard_safe_text_pos(self, frame, line_idx: int) -> Tuple[int, int]:
+        x, y, w, h = config.score_roi
+        right_x = int(x + w + 20)
+        if right_x <= frame.shape[1] - 460:
+            return right_x, int(y + 28 + (line_idx * 28))
+        return int(x), int(y + h + 32 + (line_idx * 28))
 
     def _sync_ball_drawer(self, tracker) -> None:
         drawer = tracker.drawer_snapshot() if hasattr(tracker, "drawer_snapshot") else []
@@ -1498,14 +1725,31 @@ class AnalyticsEngine:
         ball_state,
         players: List[Dict],
         tracker,
+        scoreboard_frame=None,
     ) -> Tuple[bool, Optional[str]]:
         """
         Update rally state and return (rally_finished, point_label).
         Stats are only recorded when OCR confirms a score change.
         """
+        scoreboard_read_frame = scoreboard_frame.copy() if scoreboard_frame is not None else frame.copy()
         self.point_finalized = False
         self.score_just_updated = False
         self._sync_ball_drawer(tracker)
+        game_context = getattr(ball_state, "game_context", None)
+        if game_context is None and hasattr(tracker, "game_context_snapshot"):
+            game_context = tracker.game_context_snapshot()
+        suppress_for_stats = bool(
+            getattr(config, "GAME_RULES_SUPPRESS_DUBIOUS_BALL_FOR_ANALYTICS", True)
+            and getattr(ball_state, "visible", False)
+            and not bool(getattr(ball_state, "ball_accepted_for_stats", True))
+        )
+        if suppress_for_stats:
+            if getattr(config, "GAME_RULES_DEBUG_LOG", False):
+                reason = ""
+                if isinstance(game_context, dict):
+                    reason = ";".join(str(r) for r in game_context.get("reasons", []))
+                print(f"[GAME-RULES] Bola ignorada para analytics: {reason or getattr(ball_state, 'ball_quality', 'dubious')}.")
+            ball_state = replace(ball_state, visible=False, track_state="lost")
 
         ball_px = (float(ball_state.pixel[0]), float(ball_state.pixel[1]))
         self._update_ball_dead_state(ball_state, timestamp_s, frame.shape[0])
@@ -1547,10 +1791,11 @@ class AnalyticsEngine:
             lado0 = self._side_from_x_position(float(ordered_drawer[0][0]), tracker)
             lado1 = self._side_from_x_position(float(ordered_drawer[-1][0]), tracker)
             vetor_mesma_posse = lado0 is not None and lado1 is not None and lado0 == lado1
+        vector_pos = self._scoreboard_safe_text_pos(frame, 0)
         cv2.putText(
             frame,
             f"[Vetor] Mesma Posse: {'Sim' if vetor_mesma_posse else 'Nao'}",
-            (20, 56),
+            vector_pos,
             cv2.FONT_HERSHEY_SIMPLEX,
             0.7,
             (255, 255, 0),
@@ -1562,10 +1807,11 @@ class AnalyticsEngine:
             posse_txt = "Posse: Equipa A"
         elif posse_side == "CampoB":
             posse_txt = "Posse: Equipa B"
+        possession_pos = self._scoreboard_safe_text_pos(frame, 1)
         cv2.putText(
             frame,
             posse_txt,
-            (20, 84),
+            possession_pos,
             cv2.FONT_HERSHEY_SIMPLEX,
             0.7,
             (0, 255, 0),
@@ -1683,17 +1929,15 @@ class AnalyticsEngine:
         self.prev_visible_in_block_zone = in_block_zone
 
         if frame_idx % config.ocr_every_n_frames == 0 and self.pending_score_change is None:
-            score_stable = self.ocr.read(frame)
+            score_stable = self.ocr.read(scoreboard_read_frame, frame_idx=frame_idx, timestamp_s=timestamp_s)
             score_raw = getattr(self.ocr, "last_raw_score", None)
             self.last_ocr_score_stable = score_stable
             self.last_ocr_score_raw = score_raw
 
             score = score_stable
-            # Score-first closure: if stable OCR lags, use raw changed reading.
             if self.prev_score is not None:
-                if (score is None or score == self.prev_score) and score_raw is not None and score_raw != self.prev_score:
-                    score = score_raw
-                # Release OCR locks as soon as OCR aligns with official score.
+                # Raw readings are useful for releasing locks only; they are not
+                # accepted as rally-ending truth until ScoreboardOCR confirms them.
                 if score_stable == self.prev_score or score_raw == self.prev_score:
                     self._clear_ocr_block_value(announce=False)
                     self.valor_recuperacao_ocr = None
@@ -1716,8 +1960,6 @@ class AnalyticsEngine:
             if self.prev_score is None:
                 if score is not None:
                     self.prev_score = score
-                elif score_raw is not None:
-                    self.prev_score = score_raw
             elif score is not None:
                 # Release OCR lock once reading aligns with official score.
                 if score == self.prev_score:
@@ -1829,7 +2071,12 @@ class AnalyticsEngine:
             inconclusivo = True
             resultado = "RALLY_ONLY"
             ptype = "RALLY_ONLY"
-            net_crossing_detected = bool(self.rally_crossings > 0 or self._drawer_crossed_net(tracker))
+            game_rule_crossings = 0
+            game_rule_possession = None
+            if isinstance(game_context, dict):
+                game_rule_crossings = int(game_context.get("rally_net_crossings") or 0)
+                game_rule_possession = game_context.get("possession_side")
+            net_crossing_detected = bool(self.rally_crossings > 0 or game_rule_crossings > 0 or self._drawer_crossed_net(tracker))
             can_classify_short = bool(len(analysis_drawer) >= self.min_frames_for_technical_stats or net_crossing_detected)
             if not can_classify_short:
                 print("[INFO] Rali contabilizado por placar, mas sem frames/crossing suficientes para classificação técnica.")
@@ -1838,6 +2085,8 @@ class AnalyticsEngine:
                 if attacker_hint not in ("CampoA", "CampoB"):
                     tracker_attacker = getattr(tracker, "attacking_side", None)
                     attacker_hint = tracker_attacker if tracker_attacker in ("CampoA", "CampoB") else self.campo_posse_atual
+                if attacker_hint not in ("CampoA", "CampoB") and game_rule_possession in ("CampoA", "CampoB"):
+                    attacker_hint = game_rule_possession
                 pm = self.check_post_mortem(
                     tracker=tracker,
                     end_side=None,
@@ -1876,6 +2125,13 @@ class AnalyticsEngine:
             self.point_finalized = True
             ptype = self.update_stats(baseline_ptype=ptype, winner=winner_effective, timestamp_s=timestamp_s)
             self.visual_end_state = self.RALLY_CONFIRMED_OCR
+            if hasattr(tracker, "note_score_change"):
+                tracker.note_score_change(
+                    prev_score=self.pending_score_prev_base,
+                    new_score=final_score,
+                    timestamp_s=timestamp_s,
+                    frame_idx=frame_idx,
+                )
 
             if final_score is not None:
                 self.prev_score = final_score
@@ -1905,7 +2161,7 @@ class AnalyticsEngine:
                 impact=ball_state.court,
                 reason="score_change",
                 attacker=lado_origem,
-                net_crossings=self.rally_crossings,
+                net_crossings=max(self.rally_crossings, game_rule_crossings),
                 ball_speed_mean=speed_mean,
                 trajectory=trajectory_for_rally,
             )
