@@ -21,6 +21,17 @@ import numpy as np
 import torch
 from ultralytics import YOLO
 
+from ball_tracking_core import (
+    BallTrackerCore,
+    BallTrackingConfig,
+    TRACK_LOST,
+    TRACK_OBSERVED,
+    TRACK_PREDICTED,
+    resize_frame_with_scale,
+    scale_detection,
+    scale_point,
+    scale_points,
+)
 from calibration import pixel_to_court
 from config import config
 
@@ -37,6 +48,9 @@ class BallState:
     visible: bool
     vx: float
     vy: float
+    track_state: str = TRACK_LOST
+    accepted_ball_center: Optional[Tuple[float, float]] = None
+    predicted_ball_center: Optional[Tuple[float, float]] = None
 
 
 class BallKalman:
@@ -72,14 +86,18 @@ class BallKalman:
 class VolleyballTracker:
     def __init__(self, H: np.ndarray, net_line: Tuple[Tuple[int, int], Tuple[int, int]]):
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        model_path = Path("best.pt")
+        model_path = Path(getattr(config, "ball_yolo_model", "runs/detect/train5/weights/best.pt"))
         if not model_path.exists():
-            model_path = Path(config.yolo_model)
+            candidate = Path("runs/detect/train5/weights/best.pt")
+            model_path = candidate if candidate.exists() else Path(config.yolo_model)
+        if not model_path.exists():
+            model_path = Path("best.pt")
         self.model = YOLO(str(model_path))
         try:
             self.model.to(self.device)
         except Exception:
             self.device = "cpu"
+        self.yolo_device = 0 if self.device.startswith("cuda") else "cpu"
 
         self.H = H
         self.H_inv = np.linalg.inv(H)
@@ -104,6 +122,18 @@ class VolleyballTracker:
         self.kalman_gate_px: float = float(getattr(config, "kalman_gate_px", 60.0))
         self.ball_min_area_px: float = float(getattr(config, "ball_min_area_px", 10.0))
         self.ball_max_area_px: float = float(getattr(config, "ball_max_area_px", 2000.0))
+        self.ball_core = BallTrackerCore(
+            BallTrackingConfig(
+                conf_threshold=float(getattr(config, "ball_core_conf_threshold", 0.15)),
+                resize_width=int(getattr(config, "ball_core_resize_width", 1280)),
+                pixels_per_meter=float(getattr(config, "ball_pixels_per_meter", 50.0)),
+                trajectory_length=int(getattr(config, "ball_debug_trajectory_length", 40)),
+                max_trajectory_segment_pixels=float(getattr(config, "ball_debug_max_segment_px", 120.0)),
+            )
+        )
+        self.ball_frame_scale_x: float = 1.0
+        self.ball_frame_scale_y: float = 1.0
+        self.last_ball_core_result = None
         self.net_buffer_px: float = float(getattr(config, "net_buffer_px", 15.0))
         self.side_confirm_frames: int = 5
         self.current_ball_side: Optional[str] = None
@@ -119,6 +149,7 @@ class VolleyballTracker:
         self.ball_id = 1
         self.ball_missing = 0
         self.ball_last_det: Optional[Dict] = None
+        self.current_ball_det: Optional[Dict] = None
         self.field_roi_polygon: Optional[np.ndarray] = self._build_field_roi_polygon()
         self.field_roi_top_y: Optional[float] = float(np.min(self.field_roi_polygon[:, 1])) if self.field_roi_polygon is not None else None
         self.ceiling_margin_px: float = 150.0
@@ -166,91 +197,132 @@ class VolleyballTracker:
             return True
         return int(cls) == CLASS_PERSON and "ball" not in name
 
-    def detect(self, frame) -> Dict:
-        """Run YOLO tracking and return players + ball detection."""
-        results = self.model.track(
-            source=frame,
-            stream=False,
-            persist=True,
-            conf=self.ball_conf_low,
-            iou=config.iou_thresh,
-            imgsz=1280,
-            vid_stride=1,
-            classes=[CLASS_PERSON, CLASS_SPORTS_BALL],
-            device=self.device,
+    def detect(self, frame, timestamp_s: Optional[float] = None, fps: Optional[float] = None) -> Dict:
+        """Run the same ball decision pipeline used by test_ball_detection.py."""
+        ball_frame, scale_x, scale_y = resize_frame_with_scale(frame, self.ball_core.cfg.resize_width)
+        self.ball_frame_scale_x = float(scale_x)
+        self.ball_frame_scale_y = float(scale_y)
+
+        fg_mask = self.ball_core.build_foreground_mask(ball_frame)
+        infer_size = max(ball_frame.shape[0], ball_frame.shape[1])
+        results = self.model.predict(
+            source=ball_frame,
+            conf=self.ball_core.cfg.conf_threshold,
+            imgsz=infer_size,
+            device=self.yolo_device,
             verbose=False,
         )
-        if not results:
-            return {"players": [], "ball_det": self._ball_fallback_det()}
-        res = results[0]
+        res = results[0] if results else None
+        fps_value = float(fps) if fps is not None and fps > 0 else 30.0
+        core_result = self.ball_core.update_from_yolo_result(
+            res,
+            ball_frame.shape,
+            fg_mask,
+            fps=fps_value,
+            pixels_per_meter=self.ball_core.cfg.pixels_per_meter,
+        )
+        self.last_ball_core_result = core_result
 
         players: List[Dict] = []
-        ball_det: Optional[Dict] = None
-        ball_candidates: List[Dict] = []
-        pred_center = self._kalman_predicted_center()
-        for box in res.boxes:
-            cls = int(box.cls)
-            x1, y1, x2, y2 = box.xyxy[0].tolist()
-            cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
-
-            if self._is_person_detection(cls, res) and float(box.conf) >= 0.40:
+        if res is not None and getattr(res, "boxes", None) is not None:
+            for box in res.boxes:
+                cls = int(box.cls.item()) if hasattr(box.cls, "item") else int(box.cls)
+                if not self._is_person_detection(cls, res):
+                    continue
+                conf = float(box.conf.item()) if hasattr(box.conf, "item") else float(box.conf)
+                if conf < 0.40:
+                    continue
+                x1, y1, x2, y2 = box.xyxy[0].tolist()
                 tid = int(box.id.item()) if box.id is not None else -1
-                players.append({"id": tid, "bbox": (x1, y1, x2, y2), "conf": float(box.conf)})
-            elif self._is_ball_detection(cls, res):
-                conf = float(box.conf)
-                area = (x2 - x1) * (y2 - y1)
-                if area < self.ball_min_area_px or area > self.ball_max_area_px:
-                    continue
-                if abs(float(cx)) < 1e-6 and abs(float(cy)) < 1e-6:
-                    continue
-                court_pt = pixel_to_court(self.H, (cx, cy))
-                if not self._court_contains(court_pt):
-                    continue
-                if not self._inside_field_roi((float(cx), float(cy))):
-                    continue
-                if pred_center is not None:
-                    dist_to_pred = float(np.hypot(float(cx) - pred_center[0], float(cy) - pred_center[1]))
-                else:
-                    dist_to_pred = 1e9
-                accepted = bool(
-                    conf >= self.ball_conf_high
-                    or (conf >= self.ball_conf_low and dist_to_pred < self.kalman_gate_px)
+                players.append(
+                    {
+                        "id": tid,
+                        "bbox": (x1 * scale_x, y1 * scale_y, x2 * scale_x, y2 * scale_y),
+                        "conf": conf,
+                    }
                 )
-                if not accepted:
-                    continue
-                det = {
-                    "bbox": (x1, y1, x2, y2),
-                    "center": (cx, cy),
-                    "conf": conf,
-                    "area": area,
-                    "dist_kalman": dist_to_pred,
-                    "visible": True,
-                }
-                ball_candidates.append(det)
 
-        if ball_candidates:
-            ball_det = min(ball_candidates, key=lambda b: (float(b.get("dist_kalman", 1e9)), -float(b.get("conf", 0.0))))
-            now_t = float(time.time())
-            self._infill_ball_drawer_gap_if_needed(float(ball_det["center"][0]), float(ball_det["center"][1]), now_t)
-            self._append_ball_drawer(float(ball_det["center"][0]), float(ball_det["center"][1]), now_t)
+        accepted_det = scale_detection(core_result.accepted_detection, scale_x, scale_y)
+        predicted_center = scale_point(core_result.predicted_ball_center, scale_x, scale_y)
+        if accepted_det is not None:
+            accepted_det["conf"] = float(accepted_det.get("confidence", 0.0))
+            accepted_det["visible"] = True
+            accepted_det["track_state"] = TRACK_OBSERVED
+            accepted_det["accepted_ball_center"] = accepted_det["center"]
+            accepted_det["predicted_ball_center"] = predicted_center
+            accepted_det["selection_reason"] = core_result.selection_reason
+            accepted_det["foreground_reason"] = core_result.foreground_reason
+            accepted_det["ball_core_debug"] = dict(core_result.debug)
+            now_t = float(timestamp_s) if timestamp_s is not None else float(time.time())
+            self._infill_ball_drawer_gap_if_needed(float(accepted_det["center"][0]), float(accepted_det["center"][1]), now_t)
+            self._append_ball_drawer(float(accepted_det["center"][0]), float(accepted_det["center"][1]), now_t)
             self.ball_missing = 0
-            self.ball_last_det = dict(ball_det)
+            self.ball_last_det = dict(accepted_det)
+            self.current_ball_det = dict(accepted_det)
+            ball_det = accepted_det
         else:
-            ball_det = self._ball_fallback_det()
+            self.current_ball_det = None
+            ball_det = {
+                "bbox": None,
+                "center": predicted_center,
+                "conf": 0.0,
+                "confidence": 0.0,
+                "visible": False,
+                "track_state": core_result.ball_track_state,
+                "accepted_ball_center": None,
+                "predicted_ball_center": predicted_center,
+                "selection_reason": core_result.selection_reason,
+                "foreground_reason": core_result.foreground_reason,
+                "ball_core_debug": dict(core_result.debug),
+            }
+            if core_result.ball_track_state == TRACK_LOST:
+                ball_det = None
+
+        if getattr(config, "BALL_DEBUG_LOG", False):
+            print(self._ball_core_log_line(core_result, timestamp_s=timestamp_s))
 
         return {"players": players, "ball_det": ball_det}
+
+    def _ball_core_log_line(self, core_result, timestamp_s: Optional[float] = None) -> str:
+        selected = core_result.selected_candidate
+        if selected is None:
+            center_txt = "None"
+            conf_txt = "--"
+            score_txt = "--"
+            pred_txt = "--"
+            fg_txt = "--"
+        else:
+            center_txt = str(selected.get("center"))
+            conf_txt = f"{float(selected.get('confidence', 0.0)):.2f}"
+            score = selected.get("final_score")
+            score_txt = f"{float(score):.2f}" if score is not None else "--"
+            pred = selected.get("prediction_error")
+            pred_txt = f"{float(pred):.2f}" if pred is not None else "--"
+            fg_txt = f"{int(selected.get('fg_active_pixels', 0))}/{float(selected.get('fg_active_ratio', 0.0)):.2f}"
+        ts_txt = "--" if timestamp_s is None else f"{float(timestamp_s):.2f}"
+        return (
+            f"[BALL-CORE] ts={ts_txt} state={core_result.ball_track_state} "
+            f"center={center_txt} conf={conf_txt} score={score_txt} pred_err={pred_txt} "
+            f"fg={fg_txt} reason={core_result.selection_reason} missed={core_result.missed_frames}"
+        )
 
     def update_ball(self, ball_det: Optional[Dict], timestamp_s: Optional[float] = None) -> BallState:
         ball_visible = bool(ball_det is not None and bool(ball_det.get("visible", False)))
         meas = ball_det["center"] if ball_visible else None
+        track_state = str(ball_det.get("track_state", TRACK_OBSERVED if ball_visible else TRACK_LOST)) if ball_det is not None else TRACK_LOST
+        accepted_ball_center = ball_det.get("accepted_ball_center") if ball_det is not None else None
+        predicted_ball_center = ball_det.get("predicted_ball_center") if ball_det is not None else None
         was_visible = self.last_ball_detected
 
         if meas is not None:
-            x, y = self.ball_kf.update(meas)
+            self.ball_kf.update(meas)
+            x, y = float(meas[0]), float(meas[1])
             self.frames_since_ball = 0
             self.last_ball_detected = True
         else:
-            if self.ball_kf.initialized:
+            if track_state == TRACK_PREDICTED and predicted_ball_center is not None:
+                kx, ky = float(predicted_ball_center[0]), float(predicted_ball_center[1])
+            elif self.ball_kf.initialized:
                 kx, ky = self.ball_kf.update(None)
             else:
                 kx, ky = (self.trail[-1] if self.trail else (0.0, 0.0))
@@ -275,24 +347,23 @@ class VolleyballTracker:
         speed_px = self._instant_speed()
         court_xy = pixel_to_court(self.H, (x, y))
         vx, vy = self._last_velocity()
-        return BallState(pixel=(x, y), court=court_xy, speed_px=speed_px, visible=ball_visible, vx=vx, vy=vy)
+        return BallState(
+            pixel=(x, y),
+            court=court_xy,
+            speed_px=speed_px,
+            visible=ball_visible,
+            vx=vx,
+            vy=vy,
+            track_state=track_state,
+            accepted_ball_center=accepted_ball_center,
+            predicted_ball_center=predicted_ball_center,
+        )
 
     def _append_ball_drawer(self, x: float, y: float, t: float) -> None:
         if abs(float(x)) < 1e-6 and abs(float(y)) < 1e-6:
             return
         if not self._inside_field_roi((x, y)):
             return
-        dist_to_net = self._dist_to_net_line((x, y))
-        if dist_to_net > 400.0:
-            # Ignore isolated one-frame detections far from net when there is no continuity.
-            if not self.ball_drawer:
-                print(f"[CLEANUP] Deteção descartada: Salto de {dist_to_net:.1f}px (Impossível).")
-                return
-            last_x, last_y, _last_t = self.ball_drawer[-1]
-            continuity_dist = float(np.hypot(x - last_x, y - last_y))
-            if continuity_dist > 220.0:
-                print(f"[CLEANUP] Deteção descartada: Salto de {continuity_dist:.1f}px (Impossível).")
-                return
         if self.ball_drawer:
             last_x, last_y, _last_t = self.ball_drawer[-1]
             dist = float(np.hypot(x - last_x, y - last_y))
@@ -376,16 +447,49 @@ class VolleyballTracker:
             target_n = max(3, int(last_n))
             if len(pts) <= target_n:
                 return pts
-            # Return a compressed full-rally trail so visual debug keeps the whole rally on screen.
-            idxs = np.linspace(0, len(pts) - 1, num=target_n, dtype=np.int32).tolist()
-            return [pts[i] for i in idxs]
+            return pts[-target_n:]
         return pts
+
+    def accepted_ball_points(self, last_n: Optional[int] = None) -> List[Tuple[int, int]]:
+        points = self.ball_core.trajectory_points(last_n=last_n)
+        return scale_points(points, self.ball_frame_scale_x, self.ball_frame_scale_y)
+
+    def ball_debug_snapshot(self) -> Dict:
+        core_result = self.last_ball_core_result
+        if core_result is None:
+            quality = {
+                "tracking": False,
+                "lost": True,
+                "missed_frames": 0,
+                "max_missed_frames": self.ball_core.cfg.max_missed_frames,
+                "reason": None,
+                "track_state": TRACK_LOST,
+            }
+        else:
+            quality = {
+                "tracking": core_result.ball_track_state == TRACK_OBSERVED,
+                "lost": core_result.ball_track_state == TRACK_LOST,
+                "missed_frames": core_result.missed_frames,
+                "max_missed_frames": self.ball_core.cfg.max_missed_frames,
+                "reason": core_result.selection_reason,
+                "track_state": core_result.ball_track_state,
+                "foreground_reason": core_result.foreground_reason,
+                "candidate_debug": core_result.debug.get("candidate_debug"),
+            }
+        return {
+            "current_det": dict(self.current_ball_det) if self.current_ball_det is not None else None,
+            "trajectory": self.accepted_ball_points(),
+            "quality": quality,
+            "max_segment_px": float(self.ball_core.cfg.max_trajectory_segment_pixels * max(self.ball_frame_scale_x, self.ball_frame_scale_y)),
+        }
 
     def clear_ball_drawer(self) -> None:
         self.ball_drawer.clear()
         self.ball_drawer_hold_until_ts = -1e9
         self.ball_drawer_clear_after_ts = None
         self.tocou_rede = False
+        self.current_ball_det = None
+        self.ball_core.reset()
 
     def reset_drawer_for_service(self, x: float, y: float, t: float) -> None:
         self.clear_ball_drawer()
@@ -397,6 +501,9 @@ class VolleyballTracker:
         if abs(float(x)) < 1e-6 and abs(float(y)) < 1e-6:
             return
         self.ball_drawer.append((float(x), float(y), float(t)))
+        core_x = int(round(float(x) / max(self.ball_frame_scale_x, 1e-6)))
+        core_y = int(round(float(y) / max(self.ball_frame_scale_y, 1e-6)))
+        self.ball_core.reset((core_x, core_y))
         side = self._side_from_pixel((float(x), float(y)))
         self.current_ball_side = side
         self.side_streak_frames = 1

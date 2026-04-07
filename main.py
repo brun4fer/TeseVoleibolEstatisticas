@@ -33,30 +33,73 @@ def draw_players(frame, players):
         )
 
 
-def draw_ball_trail(frame, trail, max_points: int = 10, color=(0, 255, 0)):
-    trail = trail[-max_points:]
-    if len(trail) < 2:
-        if trail:
-            cv2.circle(frame, trail[-1], 6, (0, 0, 255), -1)
+def draw_ball_trail(frame, trail, max_points: int = 40, color=(0, 255, 255), max_segment_px: float = 120.0):
+    trail = [(int(p[0]), int(p[1])) for p in trail[-max_points:]]
+    if not trail:
         return
 
-    # Smooth polyline with a short moving average window.
-    smoothed = []
-    win = 5
-    for i in range(len(trail)):
-        a = max(0, i - win + 1)
-        chunk = trail[a : i + 1]
-        sx = int(sum(p[0] for p in chunk) / len(chunk))
-        sy = int(sum(p[1] for p in chunk) / len(chunk))
-        smoothed.append((sx, sy))
+    for i in range(1, len(trail)):
+        p0 = trail[i - 1]
+        p1 = trail[i]
+        segment_distance = float(np.hypot(p1[0] - p0[0], p1[1] - p0[1]))
+        if segment_distance > max_segment_px:
+            continue
+        cv2.line(frame, p0, p1, color, 2, cv2.LINE_AA)
 
-    pts = np.array(smoothed, dtype=np.int32).reshape(-1, 1, 2)
-    cv2.polylines(frame, [pts], isClosed=False, color=color, thickness=2)
-    cv2.circle(frame, tuple(smoothed[-1]), 6, (0, 0, 255), -1)
-    if len(smoothed) >= 2:
-        p0 = smoothed[-2]
-        p1 = smoothed[-1]
-        cv2.arrowedLine(frame, p0, p1, color, 2, tipLength=0.35)
+    cv2.circle(frame, trail[-1], 4, (0, 0, 255), -1)
+
+
+def draw_ball_debug_visual(frame, ball_det, ball_state, debug_snapshot):
+    quality = debug_snapshot.get("quality", {})
+    reason = quality.get("reason") or "na"
+    missed = int(quality.get("missed_frames", 0))
+    max_missed = int(quality.get("max_missed_frames", 0))
+
+    y0 = 268
+    if ball_det is not None and bool(ball_det.get("visible", False)):
+        x1, y1, x2, y2 = [int(round(v)) for v in ball_det["bbox"]]
+        cx, cy = [int(round(v)) for v in ball_det["center"]]
+        conf = float(ball_det.get("conf", ball_det.get("confidence", 0.0)))
+        score = ball_det.get("final_score")
+        speed_value = ball_det.get("speed_px_mean", ball_state.speed_px)
+        speed = float(ball_state.speed_px if speed_value is None else speed_value)
+
+        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+        cv2.circle(frame, (cx, cy), 5, (0, 0, 255), -1)
+        cv2.putText(
+            frame,
+            f"ball {conf:.2f}",
+            (x1, max(20, y1 - 10)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.65,
+            (0, 255, 0),
+            2,
+            cv2.LINE_AA,
+        )
+        score_txt = f"{float(score):.1f}" if score is not None else "na"
+        cv2.putText(
+            frame,
+            f"Ball OK | speed={speed:.1f}px/f | score={score_txt} | {reason}",
+            (20, y0),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.55,
+            (0, 255, 255),
+            2,
+            cv2.LINE_AA,
+        )
+        return
+
+    track_state = quality.get("track_state", "lost")
+    cv2.putText(
+        frame,
+        f"Ball {str(track_state).upper()} | missed={missed}/{max_missed} | {reason}",
+        (20, y0),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.55,
+        (0, 0, 255),
+        2,
+        cv2.LINE_AA,
+    )
 
 
 def draw_ocr_roi_debug(frame, roi):
@@ -131,8 +174,8 @@ def main():
             frame_idx += 1
             continue
 
-        detections = tracker.detect(frame)
         ts = frame_idx / fps
+        detections = tracker.detect(frame, timestamp_s=ts, fps=fps)
         ball_state = tracker.update_ball(detections["ball_det"], timestamp_s=ts)
 
         rally_finished, ptype = analytics.process_frame(
@@ -154,7 +197,17 @@ def main():
 
         if not config.HEADLESS_MODE:
             draw_players(frame, detections["players"])
-            draw_ball_trail(frame, tracker.drawer_points(last_n=50), max_points=50, color=trail_color)
+            ball_debug = tracker.ball_debug_snapshot()
+            ball_trail = tracker.accepted_ball_points(last_n=config.ball_debug_trajectory_length)
+            draw_ball_trail(
+                frame,
+                ball_trail,
+                max_points=config.ball_debug_trajectory_length,
+                color=trail_color,
+                max_segment_px=config.ball_debug_max_segment_px,
+            )
+            if getattr(config, "BALL_DEBUG_VISUAL", False):
+                draw_ball_debug_visual(frame, detections["ball_det"], ball_state, ball_debug)
             draw_sidebar(frame, analytics.rally_mgr, analytics.counts, analytics.rally_counter)
             if analytics.prev_score is not None:
                 _a_set, a_pts, _b_set, b_pts = analytics.prev_score

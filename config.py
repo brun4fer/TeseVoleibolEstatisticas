@@ -13,7 +13,7 @@ def _time_to_seconds(ts: str) -> float:
 class Config:
     # Paths
     videos_dir: Path = Path(r"C:\Users\Utilizador\Desktop\Mestrado\Tese\VideosJogos")
-    video_file: str = "video-2026-02-24T15-06-27.171Z.mp4"
+    video_file: str = "VideoAcademica.mp4"
     output_dir: Path = Path("outputs")
     calibration_dir: Path = Path("calibration")
 
@@ -23,6 +23,7 @@ class Config:
 
     # Models
     yolo_model: str = "yolov8s.pt"  # modelo small para melhor detecção de bola
+    ball_yolo_model: str = "runs/detect/train5/weights/best.pt"
     score_reader_lang: Tuple[str, ...] = ("en",)
 
     # Detection thresholds
@@ -67,6 +68,13 @@ class Config:
 
     # UI / execução
     HEADLESS_MODE: bool = False
+    BALL_DEBUG_VISUAL: bool = True
+    BALL_DEBUG_LOG: bool = False
+    ball_core_conf_threshold: float = 0.15
+    ball_core_resize_width: int = 1280
+    ball_pixels_per_meter: float = 50.0
+    ball_debug_trajectory_length: int = 40
+    ball_debug_max_segment_px: float = 120.0
 
     def video_path(self) -> Path:
         return self.videos_dir / self.video_file
