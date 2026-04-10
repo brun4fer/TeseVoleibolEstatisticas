@@ -32,8 +32,8 @@ from ball_tracking_core import (
     scale_point,
     scale_points,
 )
-from calibration import pixel_to_court
 from config import config
+from court_geometry import CourtGeometry
 from volleyball_rules import VolleyballGameIntelligence, VolleyballRulesConfig
 
 # Relevant COCO classes
@@ -109,6 +109,13 @@ class VolleyballTracker:
         self.H = H
         self.H_inv = np.linalg.inv(H)
         self.net_line = net_line
+        self.geometry = CourtGeometry(
+            H,
+            net_line,
+            court_margin_m=float(getattr(config, "court_margin_m", 0.35)),
+            neutral_tolerance_px=float(getattr(config, "game_net_neutral_px", getattr(config, "net_buffer_px", 15.0))),
+            net_zone_tolerance_px=float(getattr(config, "net_band_height_px", 25.0)),
+        )
         self.ball_kf = BallKalman()
         self.trail: Deque[Tuple[int, int]] = deque(maxlen=config.max_trail)
         self.ball_drawer: List[Tuple[float, float, float]] = []
@@ -139,7 +146,7 @@ class VolleyballTracker:
             )
         )
         self.game_intelligence = VolleyballGameIntelligence(
-            self.net_line,
+            self.geometry,
             VolleyballRulesConfig.from_config(config),
         )
         self.last_game_context: Dict = self.game_intelligence.context_snapshot()
@@ -388,7 +395,7 @@ class VolleyballTracker:
             # Dynamic possession must be tracked on every frame, including short occlusions.
             self.update_possession((float(x), float(y)))
         speed_px = self._instant_speed()
-        court_xy = pixel_to_court(self.H, (x, y))
+        court_xy = self.geometry.pixel_to_court((x, y))
         vx, vy = self._last_velocity()
         state = BallState(
             pixel=(x, y),
@@ -602,24 +609,21 @@ class VolleyballTracker:
     def _inside_field_roi(self, pixel_pt: Tuple[float, float]) -> bool:
         x, y = float(pixel_pt[0]), float(pixel_pt[1])
         if self.field_roi_polygon is not None:
-            inside = cv2.pointPolygonTest(self.field_roi_polygon.astype(np.float32), (x, y), False) >= 0
-            if not inside:
+            inside_polygon = cv2.pointPolygonTest(self.field_roi_polygon.astype(np.float32), (x, y), False) >= 0
+            if not inside_polygon and self.field_roi_top_y is not None:
+                x_min = float(np.min(self.field_roi_polygon[:, 0]))
+                x_max = float(np.max(self.field_roi_polygon[:, 0]))
+                inside_polygon = x_min <= x <= x_max and (self.field_roi_top_y - self.ceiling_margin_px) <= y <= self.field_roi_top_y
+            if not inside_polygon:
                 return False
             if self.field_roi_top_y is not None and y < (self.field_roi_top_y - self.ceiling_margin_px):
                 return False
             return True
-        court_pt = pixel_to_court(self.H, (x, y))
+        court_pt = self.geometry.pixel_to_court((x, y))
         return self._court_contains(court_pt)
 
     def _build_field_roi_polygon(self) -> Optional[np.ndarray]:
-        corners_court = ((0.0, 0.0), (9.0, 0.0), (9.0, 18.0), (0.0, 18.0))
-        pts: List[Tuple[float, float]] = []
-        for c in corners_court:
-            px = self._court_to_pixel(c)
-            if px is None:
-                return None
-            pts.append((float(px[0]), float(px[1])))
-        return np.array(pts, dtype=np.float32)
+        return self.geometry.get_court_zones()["court"].copy()
 
     def _prune_isolated_outlier(self) -> None:
         if len(self.ball_drawer) < 3:
@@ -736,24 +740,20 @@ class VolleyballTracker:
         return pts
 
     def _court_contains(self, court_pt: Tuple[float, float]) -> bool:
-        margin = config.court_margin_m
-        x, y = court_pt
-        return -margin <= x <= 9 + margin and -margin <= y <= 18 + margin
+        return self.geometry.is_inside_court(court_pt, point_space="court")
 
     def _side_from_pixel(self, pixel_pt: Tuple[float, float]) -> Optional[str]:
-        s = self._signed_side(pixel_pt)
-        if abs(s) < 1e-6:
-            return self.current_ball_side
-        return "CampoA" if s > 0 else "CampoB"
+        side = self.geometry.get_side_of_net(pixel_pt, neutral_tolerance_px=1.0)
+        return self.current_ball_side if side is None else side
 
     def update_possession(self, pixel_pt: Tuple[float, float]) -> Optional[str]:
         if self._dist_to_net_line(pixel_pt) < self.net_buffer_px:
-            # Neutral zone near net: keep last confirmed possession.
-            return self.attacking_side
+            # Neutral zone near net: keep current confirmed possession as attack reference.
+            return self.posse_atual if self.posse_atual in ("CampoA", "CampoB") else self.attacking_side
 
         side = self._side_from_pixel(pixel_pt)
         if side is None:
-            return self.attacking_side
+            return self.posse_atual if self.posse_atual in ("CampoA", "CampoB") else self.attacking_side
 
         previous_side = self.current_ball_side
         if self.current_ball_side is None:
@@ -779,55 +779,43 @@ class VolleyballTracker:
             self.campo_posse_atual = side
             self.posse_atual = side
 
-        # Attacker is frozen at net-intersection using last confirmed possession.
+        # Attack reference must follow the current possession, not the service side.
         if self.ball_near_net(pixel_pt):
             net_attacker = self.posse_atual if self.posse_atual in ("CampoA", "CampoB") else previous_side
             if net_attacker in ("CampoA", "CampoB"):
                 self.attacking_side = net_attacker
-        elif self.attacking_side is None and self.posse_atual in ("CampoA", "CampoB"):
+        elif self.posse_atual in ("CampoA", "CampoB"):
             self.attacking_side = self.posse_atual
         return self.attacking_side
 
     def _signed_side(self, pixel_pt: Tuple[float, float]) -> float:
-        (x1, y1), (x2, y2) = self.net_line
-        return float((x2 - x1) * (pixel_pt[1] - y1) - (y2 - y1) * (pixel_pt[0] - x1))
+        return float(self.geometry.signed_distance_to_net(pixel_pt))
 
     def _project_point_to_net(self, pixel_pt: Tuple[float, float]) -> Tuple[Tuple[float, float], float]:
-        (x1, y1), (x2, y2) = self.net_line
-        dx, dy = x2 - x1, y2 - y1
-        denom = dx * dx + dy * dy
-        if denom == 0:
-            return (float(x1), float(y1)), 1e9
-        t = ((pixel_pt[0] - x1) * dx + (pixel_pt[1] - y1) * dy) / denom
-        t = max(0.0, min(1.0, t))
-        proj_x = x1 + t * dx
-        proj_y = y1 + t * dy
-        dist = float(np.hypot(pixel_pt[0] - proj_x, pixel_pt[1] - proj_y))
-        return (float(proj_x), float(proj_y)), dist
+        return self.geometry.project_point_to_net(pixel_pt)
 
     def _dist_to_net_line(self, pixel_pt: Tuple[float, float]) -> float:
-        _, dist = self._project_point_to_net(pixel_pt)
-        return dist
+        return float(self.geometry.distance_to_net(pixel_pt))
 
     def ball_near_net(self, pixel_pt: Tuple[float, float]) -> bool:
-        return self._dist_to_net_line(pixel_pt) <= config.net_band_height_px
+        return bool(self.geometry.is_in_net_zone(pixel_pt, tolerance_px=float(config.net_band_height_px)))
 
     def ball_on_net_line(self, pixel_pt: Tuple[float, float]) -> bool:
-        return self._dist_to_net_line(pixel_pt) <= config.net_line_tolerance_px
+        return bool(self.geometry.is_in_net_zone(pixel_pt, tolerance_px=float(config.net_line_tolerance_px)))
 
     def crossed_net_line(self) -> bool:
         if len(self.trail) < 2:
             return False
-        side_prev = self._signed_side(self.trail[-2])
-        side_cur = self._signed_side(self.trail[-1])
-        return side_prev * side_cur < 0
+        return bool(
+            self.geometry.did_cross_net(
+                self.trail[-2],
+                self.trail[-1],
+                neutral_tolerance_px=float(config.net_line_tolerance_px),
+            )
+        )
 
     def _segment_intersects_net(self, p1: Tuple[float, float], p2: Tuple[float, float], tolerance_px: float) -> bool:
-        if self._dist_to_net_line(p1) <= tolerance_px or self._dist_to_net_line(p2) <= tolerance_px:
-            return True
-        s1 = self._signed_side(p1)
-        s2 = self._signed_side(p2)
-        return s1 * s2 < 0
+        return bool(self.geometry.did_cross_net(p1, p2, neutral_tolerance_px=float(tolerance_px)))
 
     def _segment_intersection_point(
         self,
@@ -1014,38 +1002,10 @@ class VolleyballTracker:
             self.recent_net_events.popleft()
 
     def _court_to_pixel(self, court_pt: Tuple[float, float]) -> Optional[Tuple[float, float]]:
-        p = np.array([[court_pt[0]], [court_pt[1]], [1.0]], dtype=np.float32)
-        proj = self.H_inv @ p
-        if abs(float(proj[2])) < 1e-8:
-            return None
-        proj /= proj[2]
-        return float(proj[0]), float(proj[1])
+        return self.geometry.court_to_pixel(court_pt)
 
     def _meters_to_pixels_near_net(self, meters: float) -> float:
-        if meters <= 0:
-            return 0.0
-        p1 = np.array(self.net_line[0], dtype=np.float32)
-        p2 = np.array(self.net_line[1], dtype=np.float32)
-        net_center_px = ((p1 + p2) / 2.0).tolist()
-        net_center_court = pixel_to_court(self.H, (float(net_center_px[0]), float(net_center_px[1])))
-
-        px_per_meter_samples: List[float] = []
-        for dx, dy in ((meters, 0.0), (-meters, 0.0), (0.0, meters), (0.0, -meters)):
-            c_pt = (net_center_court[0] + dx, net_center_court[1] + dy)
-            if not self._court_contains(c_pt):
-                continue
-            p_pt = self._court_to_pixel(c_pt)
-            if p_pt is None:
-                continue
-            dist_px = float(np.hypot(p_pt[0] - net_center_px[0], p_pt[1] - net_center_px[1]))
-            px_per_meter_samples.append(dist_px / meters)
-
-        if px_per_meter_samples:
-            return float(np.median(px_per_meter_samples) * meters)
-
-        net_len_px = float(np.hypot(p2[0] - p1[0], p2[1] - p1[1]))
-        approx_px_per_m = max(net_len_px / 9.0, 1.0)
-        return approx_px_per_m * meters
+        return float(self.geometry.estimate_pixels_per_meter_near_net(meters))
 
     def predict_impact_point(self) -> Optional[Tuple[int, int]]:
         if len(self.trail) < 2:

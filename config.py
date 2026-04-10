@@ -16,6 +16,8 @@ class Config:
     video_file: str = "VideoAcademica.mp4"
     output_dir: Path = Path("outputs")
     calibration_dir: Path = Path("calibration")
+    event_preview_dir: Path = Path("outputs/event_previews")
+    event_store_file: Path = Path("outputs/volleyball_events.json")
 
     # Time window (absolute timestamps in the video)
     start_ts: str = "00:27:02"
@@ -53,10 +55,21 @@ class Config:
     block_occlusion_max_frames: int = 12  # frames maximos para fechar evento por oclusao
     block_event_ttl_s: float = 3.0  # tempo maximo para associar evento da rede ao ponto OCR
     block_event_cooldown_frames: int = 6  # evita duplicar bloco em frames consecutivos
+    block_attack_min_speed_px: float = 6.0
+    block_attack_min_approach_px: float = 10.0
+    block_attack_window_points: int = 6
+    block_net_contact_window_points: int = 8
+    block_reversal_window_points: int = 6
+    block_net_max_dwell_points: int = 4
+    block_return_min_distance_px: float = 12.0
+    block_post_contact_min_speed_px: float = 4.0
+    block_live_window_points: int = 18
     ball_min_area_px: int = 10  # area minima aceitavel da bbox da bola
     ball_max_area_px: int = 2000  # area maxima aceitavel da bbox da bola
     ball_max_age_frames: int = 30  # manter ID da bola se desaparecer (frames)
     court_margin_m: float = 0.35  # tolerancia na conversao pixel->campo
+    game_ball_out_of_bounds_margin_m: float = 0.75
+    game_ball_out_of_bounds_penalty: float = 120.0
 
     # Scoreboard ROI (x, y, w, h) in pixels relative to full frame
     score_roi: Tuple[int, int, int, int] = (25, 45, 340, 150)
@@ -81,6 +94,19 @@ class Config:
     HEADLESS_MODE: bool = False
     BALL_DEBUG_VISUAL: bool = True
     BALL_DEBUG_LOG: bool = False
+    SHOW_BALL_DEBUG: bool = False
+    SHOW_SCOREBOARD_DEBUG: bool = False
+    SHOW_RULES_DEBUG: bool = False
+    SHOW_GEOMETRY_DEBUG: bool = False
+    SHOW_STATS_PANEL: bool = True
+    SHOW_SCOREBOARD_PANEL: bool = True
+    SHOW_EVENT_PANEL: bool = True
+    SHOW_PLAYER_DEBUG: bool = False
+    SHOW_OCR_ROI_DEBUG: bool = False
+    SHOW_TECHNICAL_INFO: bool = False
+    SHOW_NET_ZONE_DEBUG: bool = False
+    SHOW_BLOCK_DEBUG: bool = False
+    EVENT_BANNER_HOLD_S: float = 4.0
     ball_core_conf_threshold: float = 0.15
     ball_core_resize_width: int = 1280
     ball_pixels_per_meter: float = 50.0
@@ -93,6 +119,8 @@ class Config:
     GAME_RULES_SUPPRESS_DUBIOUS_BALL_FOR_ANALYTICS: bool = True
     GAME_RULES_DEBUG_VISUAL: bool = True
     GAME_RULES_DEBUG_LOG: bool = False
+    BLOCK_DEBUG_VISUAL: bool = True
+    BLOCK_DEBUG_LOG: bool = False
     game_net_neutral_px: float = 15.0
     game_net_cross_tolerance_px: float = 80.0
     game_net_cross_confirm_frames: int = 3
@@ -112,6 +140,8 @@ class Config:
     game_possession_confirm_frames: int = 3
     game_rally_lost_confirm_s: float = 1.0
     game_score_confirm_window_s: float = 2.0
+    event_store_reset_on_start: bool = True
+    event_preview_max_width: int = 420
 
     def video_path(self) -> Path:
         return self.videos_dir / self.video_file
@@ -119,6 +149,7 @@ class Config:
     def ensure_dirs(self) -> None:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.calibration_dir.mkdir(parents=True, exist_ok=True)
+        self.event_preview_dir.mkdir(parents=True, exist_ok=True)
 
     def time_window_frames(self, fps: float) -> Tuple[int, int]:
         start_sec = _time_to_seconds(self.start_ts)

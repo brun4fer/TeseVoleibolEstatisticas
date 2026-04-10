@@ -17,10 +17,7 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 
 from ball_tracking_core import TRACK_LOST, TRACK_OBSERVED, TRACK_PREDICTED
-
-
-SIDE_A = "CampoA"
-SIDE_B = "CampoB"
+from court_geometry import CourtGeometry, SIDE_A, SIDE_B
 
 
 @dataclass
@@ -48,6 +45,8 @@ class VolleyballRulesConfig:
     possession_confirm_frames: int = 3
     rally_lost_confirm_s: float = 1.0
     score_confirm_window_s: float = 2.0
+    out_of_bounds_margin_m: float = 0.75
+    out_of_bounds_penalty: float = 120.0
 
     @classmethod
     def from_config(cls, config) -> "VolleyballRulesConfig":
@@ -75,6 +74,8 @@ class VolleyballRulesConfig:
             possession_confirm_frames=int(getattr(config, "game_possession_confirm_frames", 3)),
             rally_lost_confirm_s=float(getattr(config, "game_rally_lost_confirm_s", 1.0)),
             score_confirm_window_s=float(getattr(config, "game_score_confirm_window_s", 2.0)),
+            out_of_bounds_margin_m=float(getattr(config, "game_ball_out_of_bounds_margin_m", getattr(config, "court_margin_m", 0.75))),
+            out_of_bounds_penalty=float(getattr(config, "game_ball_out_of_bounds_penalty", 120.0)),
         )
 
 
@@ -163,10 +164,11 @@ class GameContext:
 class VolleyballGameIntelligence:
     def __init__(
         self,
-        net_line: Tuple[Tuple[int, int], Tuple[int, int]],
+        geometry: CourtGeometry,
         cfg: VolleyballRulesConfig,
     ) -> None:
-        self.net_line = net_line
+        self.geometry = geometry
+        self.net_line = geometry.net_line
         self.cfg = cfg
         self.current_rally_id = 0
         self.rally_active = False
@@ -197,21 +199,13 @@ class VolleyballGameIntelligence:
         return event
 
     def _signed_side_value(self, point: Tuple[float, float]) -> float:
-        (x1, y1), (x2, y2) = self.net_line
-        return float((x2 - x1) * (point[1] - y1) - (y2 - y1) * (point[0] - x1))
+        return float(self.geometry.signed_distance_to_net(point))
 
     def _signed_distance_to_net(self, point: Tuple[float, float]) -> float:
-        (x1, y1), (x2, y2) = self.net_line
-        length = float(np.hypot(x2 - x1, y2 - y1))
-        if length <= 1e-9:
-            return 0.0
-        return self._signed_side_value(point) / length
+        return float(self.geometry.signed_distance_to_net(point))
 
     def _side_from_point(self, point: Tuple[float, float]) -> Optional[str]:
-        signed = self._signed_distance_to_net(point)
-        if abs(signed) <= self.cfg.net_neutral_px:
-            return None
-        return SIDE_A if signed > 0 else SIDE_B
+        return self.geometry.get_side_of_net(point, neutral_tolerance_px=self.cfg.net_neutral_px)
 
     def _team_for_side(self, side: Optional[str]) -> Optional[str]:
         if side == SIDE_A:
@@ -221,28 +215,13 @@ class VolleyballGameIntelligence:
         return None
 
     def _project_to_net(self, point: Tuple[float, float]) -> Tuple[Tuple[float, float], float]:
-        (x1, y1), (x2, y2) = self.net_line
-        dx = float(x2 - x1)
-        dy = float(y2 - y1)
-        denom = dx * dx + dy * dy
-        if denom <= 1e-9:
-            return (float(x1), float(y1)), 1e9
-        t = ((point[0] - x1) * dx + (point[1] - y1) * dy) / denom
-        t = max(0.0, min(1.0, float(t)))
-        proj = (float(x1 + t * dx), float(y1 + t * dy))
-        dist = float(np.hypot(point[0] - proj[0], point[1] - proj[1]))
-        return proj, dist
+        return self.geometry.project_point_to_net(point)
 
     def _dist_to_net(self, point: Tuple[float, float]) -> float:
-        _proj, dist = self._project_to_net(point)
-        return dist
+        return float(self.geometry.distance_to_net(point))
 
     def _segment_crosses_net(self, p0: Tuple[float, float], p1: Tuple[float, float]) -> bool:
-        s0 = self._signed_distance_to_net(p0)
-        s1 = self._signed_distance_to_net(p1)
-        if abs(s0) <= self.cfg.net_cross_tolerance_px or abs(s1) <= self.cfg.net_cross_tolerance_px:
-            return True
-        return s0 * s1 < 0.0
+        return bool(self.geometry.did_cross_net(p0, p1, neutral_tolerance_px=self.cfg.net_cross_tolerance_px))
 
     def _logical_score_change(
         self,
@@ -269,16 +248,41 @@ class VolleyballGameIntelligence:
             return BallRuleDecision()
 
         point = (float(center[0]), float(center[1]))
+        court_point = self.geometry.pixel_to_court(point)
         side = self._side_from_point(point)
         penalty = 0.0
         reasons: List[str] = []
-        debug: Dict = {"candidate_center": point, "candidate_side": side}
+        court_inside = self.geometry.is_inside_court(
+            court_point,
+            point_space="court",
+            margin_m=self.cfg.out_of_bounds_margin_m,
+        )
+        court_polygon = self.geometry.get_court_zones()["court"]
+        pixel_inside = self.geometry.contains_pixel(court_polygon, point)
+        x_min = float(np.min(court_polygon[:, 0]))
+        x_max = float(np.max(court_polygon[:, 0]))
+        top_grace_px = max(self.cfg.net_cross_tolerance_px, 120.0)
+        pixel_inside_vertical_grace = x_min <= point[0] <= x_max and point[1] >= (self.geometry.court_top_y - top_grace_px)
+        inside_court = bool(court_inside or pixel_inside or pixel_inside_vertical_grace)
+        zone_name = self.geometry.point_zone(point)
+        debug: Dict = {
+            "candidate_center": point,
+            "candidate_court": court_point,
+            "candidate_side": side,
+            "inside_court": bool(inside_court),
+            "zone": zone_name,
+        }
         crosses_net = False
+
+        if not inside_court:
+            penalty += self.cfg.out_of_bounds_penalty
+            reasons.append("outside_court")
 
         if self.last_observed_center is not None:
             step_px = float(np.hypot(point[0] - self.last_observed_center[0], point[1] - self.last_observed_center[1]))
             last_dist_net = self._dist_to_net(self.last_observed_center)
             this_dist_net = self._dist_to_net(point)
+            net_motion = self.geometry.net_relative_motion(self.last_observed_center, point)
             crosses_net = self._segment_crosses_net(self.last_observed_center, point)
             debug.update(
                 {
@@ -286,6 +290,7 @@ class VolleyballGameIntelligence:
                     "last_dist_net": last_dist_net,
                     "candidate_dist_net": this_dist_net,
                     "crosses_net": crosses_net,
+                    "towards_net_delta": float(net_motion["towards_net_delta"]),
                 }
             )
             missing_frames = 0

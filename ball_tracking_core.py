@@ -339,10 +339,12 @@ def score_ball_candidate(
     confidence_bonus = confidence * 100.0 * cfg.confidence_weight
     foreground_bonus = (fg_active_pixels + (fg_active_ratio * 100.0)) * cfg.foreground_weight
     low_foreground_penalty = cfg.low_foreground_penalty if low_foreground else 0.0
-    final_score = step_cost + prediction_cost + low_foreground_penalty - confidence_bonus - foreground_bonus
+    context_penalty = float((candidate.get("game_context") or {}).get("penalty", 0.0))
+    final_score = step_cost + prediction_cost + low_foreground_penalty + context_penalty - confidence_bonus - foreground_bonus
 
     candidate["step_distance"] = step_distance
     candidate["prediction_error"] = prediction_error
+    candidate["context_penalty"] = context_penalty
     candidate["final_score"] = final_score
 
     return final_score
@@ -353,42 +355,61 @@ def select_ball_candidate(
     previous_center: Optional[Tuple[int, int]],
     older_center: Optional[Tuple[int, int]],
     cfg: BallTrackingConfig = DEFAULT_CONFIG,
-) -> Tuple[Optional[dict], str]:
+    candidate_evaluator: Optional[Callable[[Dict], Dict]] = None,
+) -> Tuple[Optional[dict], str, Optional[dict]]:
     if not candidates:
-        return None, "missed_frame_no_valid_candidate"
+        return None, "missed_frame_no_valid_candidate", None
+
+    candidate_pool: List[dict] = []
+    best_context_rejected: Optional[dict] = None
+    for candidate in candidates:
+        if candidate_evaluator is not None:
+            context = candidate_evaluator(candidate)
+            candidate["game_context"] = dict(context or {})
+            if bool((context or {}).get("reject", False)):
+                if best_context_rejected is None or float(candidate.get("confidence", 0.0)) > float(best_context_rejected.get("confidence", 0.0)):
+                    best_context_rejected = dict(candidate)
+                continue
+        candidate_pool.append(candidate)
+
+    if not candidate_pool:
+        return None, "rejected_by_game_context", best_context_rejected
 
     if not cfg.use_motion_gating:
         return (
             min(
-                candidates,
+                candidate_pool,
                 key=lambda candidate: score_ball_candidate(candidate, None, None, cfg),
             ),
             "selected_by_confidence",
+            best_context_rejected,
         )
 
     if previous_center is None:
         return (
             min(
-                candidates,
+                candidate_pool,
                 key=lambda candidate: score_ball_candidate(candidate, None, None, cfg),
             ),
             "selected_by_confidence",
+            best_context_rejected,
         )
 
     if older_center is None:
         gated_candidates = [
             candidate
-            for candidate in candidates
+            for candidate in candidate_pool
             if (pixel_distance(previous_center, candidate["center"]) or 0.0) <= cfg.max_step_pixels
         ]
         if not gated_candidates:
-            return None, "rejected_step_distance"
+            return None, "rejected_step_distance", best_context_rejected
         return (
             min(
                 gated_candidates,
                 key=lambda candidate: score_ball_candidate(candidate, previous_center, None, cfg),
             ),
             "selected_by_motion_gate",
+            best_context_rejected,
         )
 
     predicted_center = predict_next_center(previous_center, older_center)
@@ -396,7 +417,7 @@ def select_ball_candidate(
     rejected_step_distance = False
     rejected_prediction_error = False
 
-    for candidate in candidates:
+    for candidate in candidate_pool:
         step_distance = pixel_distance(previous_center, candidate["center"]) or 0.0
         if step_distance > cfg.max_step_pixels:
             rejected_step_distance = True
@@ -411,10 +432,10 @@ def select_ball_candidate(
 
     if not gated_candidates:
         if rejected_prediction_error:
-            return None, "rejected_prediction_error"
+            return None, "rejected_prediction_error", best_context_rejected
         if rejected_step_distance:
-            return None, "rejected_step_distance"
-        return None, "missed_frame_no_valid_candidate"
+            return None, "rejected_step_distance", best_context_rejected
+        return None, "missed_frame_no_valid_candidate", best_context_rejected
 
     return (
         min(
@@ -422,6 +443,7 @@ def select_ball_candidate(
             key=lambda candidate: score_ball_candidate(candidate, previous_center, predicted_center, cfg),
         ),
         "selected_by_motion_gate",
+        best_context_rejected,
     )
 
 
@@ -531,24 +553,22 @@ class BallTrackerCore:
         ppm = cfg.pixels_per_meter if pixels_per_meter is None else float(pixels_per_meter)
         predicted_before = predict_next_center(self.previous_center, self.older_center)
         ball_candidates, candidate_stats = get_ball_candidates(result, frame_shape, fg_mask, cfg)
-        detection, selection_reason = select_ball_candidate(
+        detection, selection_reason, context_rejected_candidate = select_ball_candidate(
             ball_candidates,
             self.previous_center,
             self.older_center,
             cfg,
+            candidate_evaluator=context_evaluator,
         )
         context_decision: Optional[Dict] = None
-        context_rejected_candidate: Optional[Dict] = None
-        if detection is not None and context_evaluator is not None:
-            context_decision = context_evaluator(detection)
+        if detection is not None:
+            context_decision = dict(detection.get("game_context") or {})
             if context_decision:
-                detection["game_context"] = dict(context_decision)
                 candidate_stats["game_context"] = dict(context_decision)
-                if bool(context_decision.get("reject", False)):
-                    context_rejected_candidate = dict(detection)
-                    reason = str(context_decision.get("reason") or "context_rejected")
-                    selection_reason = f"{selection_reason}|game_context_rejected:{reason}"
-                    detection = None
+        elif context_rejected_candidate is not None:
+            context_decision = dict(context_rejected_candidate.get("game_context") or {})
+            if context_decision:
+                candidate_stats["game_context"] = dict(context_decision)
         foreground_reason = ""
         if detection is not None and not candidate_stats["foreground_filter_active"]:
             foreground_reason = "selected_without_foreground_filter"
