@@ -39,7 +39,7 @@ from ball_tracking_core import (
 
 MODEL_PATH = Path("runs/detect/train5/weights/best.pt")
 VIDEO_PATH = Path(
-    r"C:/Users/Utilizador/Desktop/Mestrado/Tese/VideosJogos/VideoAcademica.mp4"
+    r"C:/Users/Utilizador/Desktop/Mestrado/Tese/VideosJogos/video-2026-02-24T15-06-27.171Z.mp4"
 )
 
 START_TIME = "00:29:02"

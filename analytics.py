@@ -1544,6 +1544,7 @@ class AnalyticsEngine:
         drawer: Optional[List[Tuple[float, float, float]]] = None,
         attacker_side: Optional[str] = None,
         winner_team: Optional[str] = None,
+        visible_trajectory: Optional[List[Tuple[int, float, float]]] = None,
     ) -> Optional[Tuple[str, Optional[str], Optional[str], bool]]:
         if drawer is None and (not self.ball_drawer or len(self.ball_drawer) < 2):
             return None
@@ -1569,6 +1570,7 @@ class AnalyticsEngine:
                     attacker_side_hint=lado_atacante,
                     attacker_team_hint=attack_team_hint,
                     winner_team=None if winner_team == "Unknown" else winner_team,
+                    visible_trajectory=visible_trajectory,
                 )
                 self.last_block_assessment = assessment
                 if assessment.attack_side in ("CampoA", "CampoB"):
@@ -1609,12 +1611,36 @@ class AnalyticsEngine:
             else:
                 resultado = "ERROR"
             block_reason = assessment.reason_text() if assessment is not None else "na"
+            block_signals = assessment.signals if assessment is not None else {}
             print(
                 f"[FINAL] Posse={self._current_possession_side()} | Atacante={assessment.attack_team if assessment is not None else attack_team_hint} "
                 f"| Bloqueio={assessment.blocking_team if assessment is not None else self._team_for_side(self._other_side(lado_atacante))} "
                 f"| Origem: {lado_atacante} | Fim: {lado_fim} | BlockState: "
                 f"{assessment.state if assessment is not None else 'na'} | Cruzou: {crossed} | "
                 f"Vmax: {peak_speed:.2f} | Razao: {block_reason} -> RESULTADO: {resultado}."
+            )
+            print(
+                f"[BLOCK-DETAIL] APPROACH={block_signals.get('approach_detected', False)} "
+                f"| NET_CONTACT={block_signals.get('net_contact', False)} "
+                f"| REVERSAL={block_signals.get('trajectory_reversed', False)} "
+                f"| ORIGIN={block_signals.get('origin_side', lado_atacante)} | END={block_signals.get('end_side', lado_fim)} "
+                f"| POSSESSION={attack_team_hint} | BLOCK={block_signals.get('block_candidate', False)} "
+                f"| ATTACK_INFERRED={block_signals.get('attack_inferred', False)}"
+            )
+            print(
+                f"[BLOCK-METRICS] APPROACH_GAIN={block_signals.get('approach_gain')} "
+                f"| TOWARDS={block_signals.get('towards_steps')} "
+                f"| MIN_NET_DIST={block_signals.get('min_dist_to_net')} "
+                f"| NET_HITS={block_signals.get('net_zone_hits')} "
+                f"| REVERSAL_REASON={block_signals.get('reversal_reason')} "
+                f"| ATTACK_INFER_REASON={block_signals.get('attack_inferred_reason')}"
+            )
+            print(
+                f"[BLOCK-GAP] GAP_NEAR_NET={block_signals.get('gap_near_net', False)} "
+                f"| GAP_FRAMES={block_signals.get('gap_frames')} "
+                f"| BEFORE_GAP={block_signals.get('before_gap_point')} "
+                f"| AFTER_GAP={block_signals.get('after_gap_point')} "
+                f"| BLOCK_FROM_GAP={block_signals.get('block_from_gap', False)}"
             )
             print(f"[POSSE] Bola no {self._current_possession_side()} | Fim da Seta: {lado_fim}")
             return resultado, lado_atacante, lado_fim, bool(crossed)
@@ -2274,11 +2300,35 @@ class AnalyticsEngine:
                 attack_team_hint=live_attack_team_hint,
             )
             if getattr(config, "BLOCK_DEBUG_LOG", False) and self.last_block_assessment.state != previous_block_state:
+                live_signals = self.last_block_assessment.signals or {}
                 print(
                     f"[BLOCK-CHECK] POSSESSION={self.current_possession_team}/{self._current_possession_side()} "
                     f"| BALL_SIDE={side} | ATTACK={self._last_attack_team()}/{self._last_attack_side()} "
                     f"| STATE={self.last_block_assessment.state} | RETURN={self.last_block_assessment.return_side} "
                     f"| REASON={self.last_block_assessment.reason_text()}"
+                )
+                print(
+                    f"[BLOCK-DETAIL] APPROACH={live_signals.get('approach_detected', False)} "
+                    f"| NET_CONTACT={live_signals.get('net_contact', False)} "
+                    f"| REVERSAL={live_signals.get('trajectory_reversed', False)} "
+                    f"| ORIGIN={live_signals.get('origin_side')} | END={live_signals.get('end_side')} "
+                    f"| ATTACK_INFERRED={live_signals.get('attack_inferred', False)} "
+                    f"| BLOCK={live_signals.get('block_candidate', False)}"
+                )
+                print(
+                    f"[BLOCK-METRICS] APPROACH_GAIN={live_signals.get('approach_gain')} "
+                    f"| TOWARDS={live_signals.get('towards_steps')} "
+                    f"| MIN_NET_DIST={live_signals.get('min_dist_to_net')} "
+                    f"| NET_HITS={live_signals.get('net_zone_hits')} "
+                    f"| REVERSAL_REASON={live_signals.get('reversal_reason')} "
+                    f"| ATTACK_INFER_REASON={live_signals.get('attack_inferred_reason')}"
+                )
+                print(
+                    f"[BLOCK-GAP] GAP_NEAR_NET={live_signals.get('gap_near_net', False)} "
+                    f"| GAP_FRAMES={live_signals.get('gap_frames')} "
+                    f"| BEFORE_GAP={live_signals.get('before_gap_point')} "
+                    f"| AFTER_GAP={live_signals.get('after_gap_point')} "
+                    f"| BLOCK_FROM_GAP={live_signals.get('block_from_gap', False)}"
                 )
         if ball_state.visible:
             self.prev_visible_side = side
@@ -2498,6 +2548,7 @@ class AnalyticsEngine:
                     attacker_side_hint=attacker_hint,
                     attacker_team_hint=attacker_team_hint,
                     winner_team=None,
+                    visible_trajectory=trajectory_for_rally,
                 )
                 self.last_block_assessment = preliminary_block
                 block_signal_state = preliminary_block.state
@@ -2519,6 +2570,7 @@ class AnalyticsEngine:
                     drawer=analysis_drawer,
                     attacker_side=attacker_hint,
                     winner_team=winner,
+                    visible_trajectory=trajectory_for_rally,
                 )
                 if pm is not None:
                     decision_result, lado_origem_pm, _lado_destino_pm, _crossed_pm = pm
