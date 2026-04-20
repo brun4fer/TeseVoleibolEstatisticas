@@ -15,6 +15,9 @@ DEFAULT_BLOCK_SIZE = 21
 DEFAULT_THRESHOLD_C = 10
 DEFAULT_ROI_SEARCH = 18
 DEFAULT_ROI_SIZE_SEARCH = 10
+DEFAULT_MATCH_THRESHOLD = 0.45
+DEFAULT_NMS_IOU_THRESHOLD = 0.30
+DEFAULT_X_GROUP_DISTANCE = 10
 
 
 @dataclass(frozen=True)
@@ -37,6 +40,30 @@ ALLOWED_DIGITS_BY_REGION = {
     "sets_b": tuple(range(6)),
     "points_b": tuple(range(10)),
 }
+
+MAX_DIGITS_BY_REGION = {
+    "sets_a": 1,
+    "points_a": 2,
+    "sets_b": 1,
+    "points_b": 2,
+}
+
+MATCH_THRESHOLD_BY_REGION = {
+    "sets_a": 0.48,
+    "points_a": 0.42,
+    "sets_b": 0.48,
+    "points_b": 0.42,
+}
+
+
+@dataclass(frozen=True)
+class MatchCandidate:
+    digit: int
+    score: float
+    x: int
+    y: int
+    w: int
+    h: int
 
 
 def parse_args() -> argparse.Namespace:
@@ -241,6 +268,26 @@ def preprocess_digit_image(
     block_size: int,
     threshold_c: int,
 ) -> np.ndarray:
+    """
+    Backward-compatible single-digit preprocessing.
+    Kept for callers that still expect a centered 40x40 glyph.
+    """
+    binary = preprocess_region_for_matching(
+        image=image,
+        invert=invert,
+        block_size=block_size,
+        threshold_c=threshold_c,
+    )
+    binary = extract_primary_component(binary)
+    return normalize_binary(binary, target_size)
+
+
+def preprocess_region_for_matching(
+    image: np.ndarray,
+    invert: bool,
+    block_size: int,
+    threshold_c: int,
+) -> np.ndarray:
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if image.ndim == 3 else image.copy()
     blurred = cv2.GaussianBlur(gray, (3, 3), 0)
     threshold_type = cv2.THRESH_BINARY_INV if invert else cv2.THRESH_BINARY
@@ -259,8 +306,49 @@ def preprocess_digit_image(
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
     binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel, iterations=1)
     binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel, iterations=1)
-    binary = extract_primary_component(binary)
-    return normalize_binary(binary, target_size)
+    return _remove_small_components(binary)
+
+
+def _remove_small_components(binary: np.ndarray) -> np.ndarray:
+    component_count, labels, stats, _centroids = cv2.connectedComponentsWithStats(binary, 8)
+    if component_count <= 1:
+        return binary
+
+    min_area = max(3, int(binary.size * 0.008))
+    cleaned = np.zeros_like(binary)
+    for label in range(1, component_count):
+        area = int(stats[label, cv2.CC_STAT_AREA])
+        if area >= min_area:
+            cleaned[labels == label] = 255
+
+    return cleaned if np.count_nonzero(cleaned) > 0 else binary
+
+
+def normalize_strip_for_matching(
+    binary: np.ndarray,
+    target_height: int,
+    min_width: int,
+) -> np.ndarray:
+    points = cv2.findNonZero(binary)
+    canvas_width = max(int(min_width), TARGET_SIZE[0])
+    if points is None:
+        return np.zeros((target_height, canvas_width), dtype=np.uint8)
+
+    x, y, w, h = cv2.boundingRect(points)
+    strip = binary[y : y + h, x : x + w]
+    if strip.size == 0:
+        return np.zeros((target_height, canvas_width), dtype=np.uint8)
+
+    scale = float(target_height) / float(max(h, 1))
+    resized_w = max(1, int(round(w * scale)))
+    interpolation = cv2.INTER_AREA if scale < 1.0 else cv2.INTER_CUBIC
+    resized = cv2.resize(strip, (resized_w, target_height), interpolation=interpolation)
+
+    padded_width = max(canvas_width, resized_w + 8)
+    canvas = np.zeros((target_height, padded_width), dtype=np.uint8)
+    x_offset = max(0, (padded_width - resized_w) // 2)
+    canvas[:, x_offset : x_offset + resized_w] = resized
+    return canvas
 
 
 def preprocess_template_image(
@@ -316,36 +404,131 @@ def split_scoreboard_roi(roi: np.ndarray, set_ratio: float) -> Dict[str, np.ndar
     }
 
 
-def match_digit(
+def _bbox_iou(a: MatchCandidate, b: MatchCandidate) -> float:
+    ax2 = a.x + a.w
+    ay2 = a.y + a.h
+    bx2 = b.x + b.w
+    by2 = b.y + b.h
+
+    inter_x1 = max(a.x, b.x)
+    inter_y1 = max(a.y, b.y)
+    inter_x2 = min(ax2, bx2)
+    inter_y2 = min(ay2, by2)
+    inter_w = max(0, inter_x2 - inter_x1)
+    inter_h = max(0, inter_y2 - inter_y1)
+    inter_area = inter_w * inter_h
+    if inter_area <= 0:
+        return 0.0
+
+    area_a = a.w * a.h
+    area_b = b.w * b.h
+    union = max(1, area_a + area_b - inter_area)
+    return float(inter_area) / float(union)
+
+
+def _nms_and_group_by_x(
+    candidates: list[MatchCandidate],
+    iou_threshold: float = DEFAULT_NMS_IOU_THRESHOLD,
+    x_group_distance: int = DEFAULT_X_GROUP_DISTANCE,
+) -> list[MatchCandidate]:
+    if not candidates:
+        return []
+
+    kept: list[MatchCandidate] = []
+    ordered = sorted(candidates, key=lambda c: c.score, reverse=True)
+    for candidate in ordered:
+        center_x = candidate.x + (candidate.w / 2.0)
+        should_keep = True
+        for chosen in kept:
+            chosen_center_x = chosen.x + (chosen.w / 2.0)
+            if _bbox_iou(candidate, chosen) >= iou_threshold:
+                should_keep = False
+                break
+            if abs(center_x - chosen_center_x) <= float(x_group_distance):
+                should_keep = False
+                break
+        if should_keep:
+            kept.append(candidate)
+    return kept
+
+
+def match_digits(
     processed: np.ndarray,
     templates: Dict[int, np.ndarray],
     allowed_digits: Tuple[int, ...] | None = None,
+    match_threshold: float = DEFAULT_MATCH_THRESHOLD,
+    nms_iou_threshold: float = DEFAULT_NMS_IOU_THRESHOLD,
+    x_group_distance: int = DEFAULT_X_GROUP_DISTANCE,
+    max_digits: int = 2,
 ) -> tuple[int, float]:
     processed_std = float(np.std(processed))
     if processed_std < 1e-6:
         return 0, -1.0
 
     digit_pool = allowed_digits if allowed_digits is not None else tuple(sorted(templates.keys()))
-    best_digit = 0
-    best_score = float("-inf")
+    candidates: list[MatchCandidate] = []
+    fallback_best: MatchCandidate | None = None
 
     for digit in digit_pool:
         template = templates[digit]
         template_std = float(np.std(template))
         if template_std < 1e-6:
             continue
+        t_h, t_w = template.shape[:2]
+        p_h, p_w = processed.shape[:2]
+        if p_h < t_h or p_w < t_w:
+            continue
 
-        score = float(
-            cv2.matchTemplate(processed, template, cv2.TM_CCOEFF_NORMED)[0, 0]
+        response = cv2.matchTemplate(processed, template, cv2.TM_CCOEFF_NORMED)
+        _min_score, max_score, _min_loc, max_loc = cv2.minMaxLoc(response)
+        current_best = MatchCandidate(
+            digit=digit,
+            score=float(max_score),
+            x=int(max_loc[0]),
+            y=int(max_loc[1]),
+            w=int(t_w),
+            h=int(t_h),
         )
-        if score > best_score:
-            best_digit = digit
-            best_score = score
+        if fallback_best is None or current_best.score > fallback_best.score:
+            fallback_best = current_best
 
-    if best_score == float("-inf"):
+        y_coords, x_coords = np.where(response >= float(match_threshold))
+        for y, x in zip(y_coords.tolist(), x_coords.tolist()):
+            score = float(response[y, x])
+            candidates.append(
+                MatchCandidate(
+                    digit=int(digit),
+                    score=score,
+                    x=int(x),
+                    y=int(y),
+                    w=int(t_w),
+                    h=int(t_h),
+                )
+            )
+
+    if not candidates and fallback_best is not None:
+        candidates = [fallback_best]
+    if not candidates:
         return 0, -1.0
 
-    return best_digit, best_score
+    filtered = _nms_and_group_by_x(
+        candidates=candidates,
+        iou_threshold=float(nms_iou_threshold),
+        x_group_distance=int(x_group_distance),
+    )
+    if not filtered and fallback_best is not None:
+        filtered = [fallback_best]
+    if not filtered:
+        return 0, -1.0
+
+    if max_digits > 0 and len(filtered) > max_digits:
+        filtered = sorted(filtered, key=lambda c: c.score, reverse=True)[:max_digits]
+    filtered = sorted(filtered, key=lambda c: c.x)
+
+    digits_as_text = "".join(str(candidate.digit) for candidate in filtered)
+    value = int(digits_as_text) if digits_as_text else 0
+    score = float(np.mean([candidate.score for candidate in filtered]))
+    return value, score
 
 
 def read_scoreboard_roi(
@@ -363,17 +546,25 @@ def read_scoreboard_roi(
     for spec in REGION_SPECS:
         crop = region_images[spec.name]
         cropped_digit = crop_inner_region(crop, spec.margins)
-        processed = preprocess_digit_image(
+        processed_binary = preprocess_region_for_matching(
             cropped_digit,
             spec.invert,
-            TARGET_SIZE,
             block_size,
             threshold_c,
         )
-        digit, score = match_digit(
+        max_digits = int(MAX_DIGITS_BY_REGION.get(spec.name, 1))
+        min_width = TARGET_SIZE[0] * max(1, max_digits)
+        processed = normalize_strip_for_matching(
+            processed_binary,
+            target_height=TARGET_SIZE[1],
+            min_width=min_width,
+        )
+        digit, score = match_digits(
             processed,
             templates,
             allowed_digits=ALLOWED_DIGITS_BY_REGION.get(spec.name),
+            match_threshold=float(MATCH_THRESHOLD_BY_REGION.get(spec.name, DEFAULT_MATCH_THRESHOLD)),
+            max_digits=max_digits,
         )
         results[spec.name] = digit
         debug_info[spec.name] = (cropped_digit, processed, score)

@@ -1,8 +1,35 @@
 {
   "version": 1,
-  "generated_at": "2026-04-20T16:10:51",
-  "updated_at": "2026-04-20T16:10:51",
+  "generated_at": "2026-04-20T17:29:09",
+  "updated_at": "2026-04-20T17:30:01",
   "source_video_path": "C:\\Users\\Utilizador\\Desktop\\Mestrado\\Tese\\VideosJogos\\VideoAcademica.mp4",
-  "next_id": 1,
-  "events": []
+  "next_id": 2,
+  "events": [
+    {
+      "id": 1,
+      "type": "undefined",
+      "category": "undefined",
+      "point_type": "RALLY_ONLY",
+      "start_frame": 66660,
+      "end_frame": 67440,
+      "start_time_seconds": 2222.0,
+      "end_time_seconds": 2248.0,
+      "timestamp_label": "00:37:28",
+      "rally_duration_seconds": 26.0,
+      "ball_avg_speed": 11.814112336090126,
+      "ball_max_speed": 159.89058759038946,
+      "point_team": "TeamB",
+      "attack_side": "CampoA",
+      "attack_team": "TeamA",
+      "defending_side": "CampoB",
+      "blocking_side": "CampoB",
+      "blocking_team": "TeamB",
+      "return_side": "CampoA",
+      "confidence": 0.25,
+      "reason": "trajectory_inconclusive",
+      "notes": "",
+      "representative_frame_path": "C:\\Users\\Utilizador\\Documents\\GitHub\\TeseVoleibolEstatisticas\\outputs\\event_previews\\event_0001.png",
+      "source_video_path": "C:\\Users\\Utilizador\\Desktop\\Mestrado\\Tese\\VideosJogos\\VideoAcademica.mp4"
+    }
+  ]
 }
