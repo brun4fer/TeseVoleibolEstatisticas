@@ -143,6 +143,8 @@ class VolleyballTracker:
                 pixels_per_meter=float(getattr(config, "ball_pixels_per_meter", 50.0)),
                 trajectory_length=int(getattr(config, "ball_debug_trajectory_length", 40)),
                 max_trajectory_segment_pixels=float(getattr(config, "ball_debug_max_segment_px", 120.0)),
+                static_fp_max_frames=int(getattr(config, "static_fp_max_frames", 30)),
+                static_fp_grid_px=int(getattr(config, "static_fp_grid_px", 30)),
             )
         )
         self.game_intelligence = VolleyballGameIntelligence(

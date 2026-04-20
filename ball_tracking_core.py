@@ -13,7 +13,7 @@ from __future__ import annotations
 from collections import deque
 from dataclasses import dataclass, field
 import math
-from typing import Callable, Deque, Dict, List, Optional, Tuple
+from typing import Callable, Deque, Dict, List, Optional, Set, Tuple
 
 import cv2
 import numpy as np
@@ -60,6 +60,10 @@ class BallTrackingConfig:
     bg_history: int = 500
     bg_var_threshold: float = 16.0
     bg_detect_shadows: bool = False
+    # Candidatos que permanecem na mesma posição (±grid_px) por este nº de frames
+    # consecutivos são considerados falsos positivos estáticos e removidos.
+    static_fp_max_frames: int = 30
+    static_fp_grid_px: int = 30
 
 
 DEFAULT_CONFIG = BallTrackingConfig()
@@ -421,6 +425,11 @@ def select_ball_candidate(
         step_distance = pixel_distance(previous_center, candidate["center"]) or 0.0
         if step_distance > cfg.max_step_pixels:
             rejected_step_distance = True
+            print(
+                f"[STEP-REJECT] Candidato rejeitado: {step_distance:.0f}px "
+                f"> max {cfg.max_step_pixels:.0f}px | "
+                f"{previous_center} → {candidate['center']}"
+            )
             continue
 
         prediction_error = pixel_distance(predicted_center, candidate["center"]) or 0.0
@@ -503,6 +512,10 @@ class BallTrackerCore:
         self.last_accepted_center: Optional[Tuple[int, int]] = None
         self.missed_frames = 0
         self.last_result: Optional[BallTrackResult] = None
+        # Streak de frames em que cada posição quantizada apareceu consecutivamente.
+        self._static_candidate_counts: Dict[Tuple[int, int], int] = {}
+        # Posições confirmadas como FP estático — rejeitadas permanentemente.
+        self._static_fp_blacklist: Set[Tuple[int, int]] = set()
 
     def reset(self, center: Optional[Tuple[int, int]] = None) -> None:
         self.previous_center = center
@@ -515,6 +528,8 @@ class BallTrackerCore:
         self.last_accepted_center = center
         self.missed_frames = 0
         self.last_result = None
+        # Streak de FP estático reseta por rally; blacklist persiste (o objeto não se move).
+        self._static_candidate_counts.clear()
 
     def build_foreground_mask(self, frame):
         if self.bg_subtractor is None:
@@ -526,6 +541,35 @@ class BallTrackerCore:
         if last_n is not None:
             return points[-max(1, int(last_n)) :]
         return points
+
+    def _quantize_pos(self, center: Tuple[int, int]) -> Tuple[int, int]:
+        g = max(1, int(self.cfg.static_fp_grid_px))
+        return (round(center[0] / g) * g, round(center[1] / g) * g)
+
+    def _filter_and_update_static_fp(self, candidates: List[Dict]) -> List[Dict]:
+        """Remove candidatos estáticos (FP persistente fora do campo).
+
+        Um candidato é classificado como FP estático se a sua posição quantizada
+        (grid de static_fp_grid_px) aparece em static_fp_max_frames frames
+        consecutivos. A posição é adicionada ao blacklist e rejeitada para sempre.
+        """
+        max_frames = int(self.cfg.static_fp_max_frames)
+        seen: Set[Tuple[int, int]] = {self._quantize_pos(c["center"]) for c in candidates}
+
+        for qpos in seen:
+            if qpos in self._static_fp_blacklist:
+                continue
+            count = self._static_candidate_counts.get(qpos, 0) + 1
+            self._static_candidate_counts[qpos] = count
+            if count >= max_frames:
+                self._static_fp_blacklist.add(qpos)
+                print(f"[STATIC-FP] Candidato rejeitado em {qpos} após {count} frames estáticos")
+
+        # Resetar streak de posições que não apareceram neste frame.
+        for qpos in [k for k in list(self._static_candidate_counts) if k not in seen]:
+            del self._static_candidate_counts[qpos]
+
+        return [c for c in candidates if self._quantize_pos(c["center"]) not in self._static_fp_blacklist]
 
     def _clear_track_after_misses(self) -> None:
         self.previous_center = None
@@ -553,6 +597,7 @@ class BallTrackerCore:
         ppm = cfg.pixels_per_meter if pixels_per_meter is None else float(pixels_per_meter)
         predicted_before = predict_next_center(self.previous_center, self.older_center)
         ball_candidates, candidate_stats = get_ball_candidates(result, frame_shape, fg_mask, cfg)
+        ball_candidates = self._filter_and_update_static_fp(ball_candidates)
         detection, selection_reason, context_rejected_candidate = select_ball_candidate(
             ball_candidates,
             self.previous_center,
@@ -623,6 +668,12 @@ class BallTrackerCore:
                             self.stationary_counter = 0
                 else:
                     ignored_jump = True
+                    print(
+                        f"[SPEED-REJECT] Salto impossível (pixels): "
+                        f"{movement_pixels:.0f}px = {raw_speed_kmh:.0f}km/h "
+                        f"(max={cfg.max_speed_kmh:.0f}km/h) "
+                        f"{self.previous_center} → {current_center}"
+                    )
             else:
                 self.older_center = self.previous_center
                 self.previous_center = current_center

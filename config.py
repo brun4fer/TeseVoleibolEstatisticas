@@ -20,7 +20,7 @@ class Config:
     event_store_file: Path = Path("outputs/volleyball_events.json")
 
     # Time window (absolute timestamps in the video)
-    start_ts: str = "00:37:02"
+    start_ts: str = "00:27:02"
     end_ts: str = "00:46:17"
 
     # Models
@@ -70,6 +70,9 @@ class Config:
     court_margin_m: float = 0.35  # tolerancia na conversao pixel->campo
     game_ball_out_of_bounds_margin_m: float = 0.75
     game_ball_out_of_bounds_penalty: float = 120.0
+    # Velocidade máxima física da bola em m/s (~126 km/h para voleibol).
+    # Candidatos que impliquem velocidade superior são rejeitados como leitura impossível.
+    max_ball_speed_ms: float = 35.0
 
     # Scoreboard ROI (x, y, w, h) in pixels relative to full frame
     score_roi: Tuple[int, int, int, int] = (25, 45, 340, 150)

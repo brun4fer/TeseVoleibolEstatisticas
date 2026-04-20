@@ -26,7 +26,7 @@ class BlockDetectorConfig:
     post_contact_min_speed_px: float = 4.0
     live_window_points: int = 18
     net_zone_tolerance_px: float = 25.0
-    gap_min_missing_frames: int = 4
+    gap_min_missing_frames: int = 3
     gap_near_net_tolerance_px: float = 40.0
     gap_jump_min_distance_px: float = 10.0
     gap_return_min_distance_px: float = 6.0
@@ -45,7 +45,7 @@ class BlockDetectorConfig:
             post_contact_min_speed_px=float(getattr(config, "block_post_contact_min_speed_px", 4.0)),
             live_window_points=int(getattr(config, "block_live_window_points", 18)),
             net_zone_tolerance_px=float(getattr(config, "net_band_height_px", 25.0)),
-            gap_min_missing_frames=int(getattr(config, "block_gap_min_missing_frames", 4)),
+            gap_min_missing_frames=int(getattr(config, "block_gap_min_missing_frames", 3)),
             gap_near_net_tolerance_px=float(
                 getattr(
                     config,
@@ -737,6 +737,14 @@ class BlockDetector:
 
             before_side = before["side"]
             after_side = after["side"]
+            # Quando a bola está mesmo junto à rede, get_side_of_net(tolerance=1px)
+            # pode retornar None. Usamos o sinal da distância como fallback.
+            if before_side not in (SIDE_A, SIDE_B):
+                signed = float(self.geometry.signed_distance_to_net(before["point"]))
+                before_side = SIDE_A if signed > 0 else (SIDE_B if signed < 0 else None)
+            if after_side not in (SIDE_A, SIDE_B):
+                signed = float(self.geometry.signed_distance_to_net(after["point"]))
+                after_side = SIDE_A if signed > 0 else (SIDE_B if signed < 0 else None)
             if before_side not in (SIDE_A, SIDE_B) or after_side not in (SIDE_A, SIDE_B):
                 continue
             if before_side != after_side:
@@ -774,6 +782,9 @@ class BlockDetector:
             block_from_gap = bool(gap_near_net and same_side_return and trajectory_reversed)
             if not block_from_gap and not approach_detected:
                 continue
+
+            if block_from_gap:
+                print(f"[BLOCK-INFERRED] Gap de {gap_frames} frames junto à rede, bola regressou ao {before_side}")
 
             attack_team = attacker_team_hint or self._team_for_side(before_side)
             attack_inferred_reason = "current_possession_gap_same_side_return" if attacker_team_hint in ("TeamA", "TeamB") else "team_from_origin_side_gap_same_side_return"

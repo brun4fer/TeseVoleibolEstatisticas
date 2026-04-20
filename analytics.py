@@ -1598,16 +1598,53 @@ class AnalyticsEngine:
             peak_speed, _mean_speed = self._speed_metrics_from_drawer(base_drawer)
             crossed = bool(crossed or (assessment.crossed_net if assessment is not None else False))
 
+            # ── Âncora pelo winner_team (fonte de verdade do OCR) ──────────────
+            # Quando a trajetória está incompleta (bola perdida ao cruzar a rede)
+            # o OCR confirma quem marcou e permite corrigir a classificação.
+            winner_is_attacker = (
+                winner_team not in (None, "Unknown")
+                and winner_team == attack_team_hint
+                and lado_atacante in ("CampoA", "CampoB")
+            )
+            if winner_is_attacker:
+                if assessment is not None and assessment.state == "confirmed_block":
+                    # Impossível: bloco daria ponto ao defensor, não ao atacante.
+                    print(
+                        f"[BLOCK-OVERRIDE] confirmed_block anulado: "
+                        f"vencedor={winner_team} é o atacante ({attack_team_hint})"
+                    )
+                    assessment = None
+                if not crossed and lado_fim == lado_atacante:
+                    # Trajetória incompleta: bola perdida ao cruzar a rede.
+                    # Atacante marcou → inferimos cruzamento para o campo adversário.
+                    crossed = True
+                    lado_fim = self._other_side(lado_atacante)
+                    print(
+                        f"[CROSS-INFERRED] Bola perdida na rede, "
+                        f"vencedor={winner_team} → cruzamento inferido, lado_fim={lado_fim}"
+                    )
+
             if assessment is not None and assessment.state == "confirmed_block":
                 resultado = "BLOCK"
             elif assessment is not None and assessment.event_type == "BOLA_NA_REDE":
                 resultado = "BALL_ON_NET"
             elif lado_atacante is None or lado_fim is None:
                 resultado = "ERROR"
+            elif (
+                crossed
+                and lado_fim != lado_atacante
+                and self.rally_crossings <= 1
+                and lado_atacante == self.serving_side
+            ):
+                # Serviço direto: bola cruzou a rede uma só vez sem retorno do adversário.
+                resultado = "ACE"
             elif crossed and lado_fim != lado_atacante and peak_speed > self.spike_speed_threshold_px:
                 resultado = "SPIKE"
             elif crossed and lado_fim != lado_atacante and peak_speed <= self.spike_speed_threshold_px:
                 resultado = "FREEBALL"
+            elif not crossed and lado_fim == lado_atacante:
+                # Bola terminou no campo do atacante (erro na rede ou fora).
+                resultado = "TEAM_ERROR"
             else:
                 resultado = "ERROR"
             block_reason = assessment.reason_text() if assessment is not None else "na"
@@ -2564,6 +2601,27 @@ class AnalyticsEngine:
             )
             if not can_classify_short:
                 print("[INFO] Rali contabilizado por placar, mas sem frames/crossing suficientes para classificação técnica.")
+                # Fallback mínimo quando não há dados de trajetória mas o OCR confirmou quem marcou.
+                # Evita deixar o ponto como RALLY_ONLY/inconclusivo quando temos informação do vencedor.
+                if winner not in (None, "Unknown") and attacker_hint in ("CampoA", "CampoB"):
+                    if winner == attacker_team_hint:
+                        # Atacante marcou sem trajetória detetada → spike inferido
+                        inconclusivo = False
+                        resultado = "SPIKE"
+                        ptype = "POINT_BY_SPIKE"
+                        print(
+                            f"[INFERRED-SPIKE] Vencedor={winner} é o atacante "
+                            f"({attacker_team_hint}) → SPIKE inferido (sem trajetória)"
+                        )
+                    else:
+                        # Defensor marcou → atacante cometeu erro
+                        inconclusivo = False
+                        resultado = "TEAM_ERROR"
+                        ptype = "OPPONENT_ERROR"
+                        print(
+                            f"[INFERRED-ERROR] Vencedor={winner} ≠ atacante "
+                            f"({attacker_team_hint}) → TEAM_ERROR inferido (sem trajetória)"
+                        )
             else:
                 pm = self.check_post_mortem(
                     tracker=tracker,
@@ -2593,6 +2651,33 @@ class AnalyticsEngine:
                         inconclusivo = False
                         resultado = "BALL_ON_NET"
                         ptype = "BOLA_NA_REDE"
+                    elif decision_result == "ACE":
+                        inconclusivo = False
+                        resultado = "ACE"
+                        ptype = "ACE"
+                    elif decision_result == "TEAM_ERROR":
+                        inconclusivo = False
+                        resultado = "TEAM_ERROR"
+                        ptype = "OPPONENT_ERROR"
+                elif winner not in (None, "Unknown") and attacker_hint in ("CampoA", "CampoB"):
+                    # check_post_mortem retornou None (drawer insuficiente).
+                    # Usar o winner como âncora de último recurso.
+                    if winner == attacker_team_hint:
+                        inconclusivo = False
+                        resultado = "SPIKE"
+                        ptype = "POINT_BY_SPIKE"
+                        print(
+                            f"[INFERRED-SPIKE] pm=None, vencedor={winner} é atacante "
+                            f"({attacker_team_hint}) → SPIKE inferido"
+                        )
+                    else:
+                        inconclusivo = False
+                        resultado = "TEAM_ERROR"
+                        ptype = "OPPONENT_ERROR"
+                        print(
+                            f"[INFERRED-ERROR] pm=None, vencedor={winner} ≠ atacante "
+                            f"({attacker_team_hint}) → TEAM_ERROR inferido"
+                        )
 
             winner_effective = winner
             if winner_effective == "Unknown":

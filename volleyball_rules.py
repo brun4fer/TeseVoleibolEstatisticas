@@ -47,6 +47,9 @@ class VolleyballRulesConfig:
     score_confirm_window_s: float = 2.0
     out_of_bounds_margin_m: float = 0.75
     out_of_bounds_penalty: float = 120.0
+    # Velocidade máxima física de uma bola de voleibol (~126 km/h).
+    # Qualquer candidato que implique velocidade superior é rejeitado.
+    max_ball_speed_ms: float = 35.0
 
     @classmethod
     def from_config(cls, config) -> "VolleyballRulesConfig":
@@ -76,6 +79,7 @@ class VolleyballRulesConfig:
             score_confirm_window_s=float(getattr(config, "game_score_confirm_window_s", 2.0)),
             out_of_bounds_margin_m=float(getattr(config, "game_ball_out_of_bounds_margin_m", getattr(config, "court_margin_m", 0.75))),
             out_of_bounds_penalty=float(getattr(config, "game_ball_out_of_bounds_penalty", 120.0)),
+            max_ball_speed_ms=float(getattr(config, "max_ball_speed_ms", 35.0)),
         )
 
 
@@ -306,6 +310,34 @@ class VolleyballGameIntelligence:
                 else:
                     penalty += self.cfg.impossible_step_penalty
                     reasons.append(f"impossible_step:{step_px:.0f}>{max_step:.0f}")
+
+            # --- Validação física em metros reais (homografia calibrada + timestamps) ---
+            # Calcula a distância em court-space (metros) entre a posição anterior
+            # e o candidato atual. Se a velocidade implícita exceder o máximo físico
+            # de uma bola de voleibol, o candidato é rejeitado como leitura impossível.
+            if timestamp_s is not None and self.last_observed_ts is not None:
+                time_elapsed_s = max(float(timestamp_s) - float(self.last_observed_ts), 1.0 / 120.0)
+                last_court = self.geometry.pixel_to_court(self.last_observed_center)
+                court_dist_m = float(np.hypot(
+                    court_point[0] - last_court[0],
+                    court_point[1] - last_court[1],
+                ))
+                required_speed_ms = court_dist_m / time_elapsed_s
+                debug["court_dist_m"] = round(court_dist_m, 3)
+                debug["required_speed_ms"] = round(required_speed_ms, 1)
+                if required_speed_ms > self.cfg.max_ball_speed_ms:
+                    penalty += self.cfg.impossible_step_penalty
+                    reasons.append(
+                        f"impossible_physical_speed:{required_speed_ms:.1f}m/s"
+                        f">{self.cfg.max_ball_speed_ms:.0f}m/s"
+                        f"({court_dist_m:.2f}m/{time_elapsed_s*1000:.0f}ms)"
+                    )
+                    print(
+                        f"[PHYSICS-REJECT] Leitura impossível: {court_dist_m:.2f}m "
+                        f"em {time_elapsed_s*1000:.0f}ms = {required_speed_ms:.0f}m/s "
+                        f"(max={self.cfg.max_ball_speed_ms:.0f}m/s) "
+                        f"pixel {self.last_observed_center} → {point}"
+                    )
 
             last_side = self.ball_side
             if last_side in (SIDE_A, SIDE_B) and side in (SIDE_A, SIDE_B) and side != last_side:
