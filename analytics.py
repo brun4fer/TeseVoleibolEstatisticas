@@ -210,7 +210,7 @@ class ScoreboardOCR:
         else:
             self.last_clean_roi = None
 
-        if not getattr(config, "HEADLESS_MODE", False) and getattr(config, "SCOREBOARD_DEBUG_WINDOW", False):
+        if not getattr(config, "HEADLESS_MODE", False) and not getattr(config, "EVALUATION_MODE", False) and getattr(config, "SCOREBOARD_DEBUG_WINDOW", False):
             dbg = frame.copy()
             if self.reader.roi is not None:
                 x, y, w, h = self.reader.roi
@@ -218,7 +218,7 @@ class ScoreboardOCR:
             cv2.imshow("DEBUG_OCR_ROI", dbg)
         parsed_raw = self.reader.read(frame)
         self._update_debug_images(frame)
-        if not getattr(config, "HEADLESS_MODE", False):
+        if not getattr(config, "HEADLESS_MODE", False) and not getattr(config, "EVALUATION_MODE", False):
             if getattr(config, "SCOREBOARD_DEBUG_CLEAN_ROI_WINDOW", False) and self.last_clean_roi is not None:
                 cv2.imshow("SCOREBOARD_CLEAN_ROI_USED", self.last_clean_roi)
             if getattr(config, "SCOREBOARD_DEBUG_PREPROCESSED_WINDOW", False) and self.last_preprocessed_debug is not None:
@@ -2170,32 +2170,33 @@ class AnalyticsEngine:
             lado0 = self._side_from_x_position(float(ordered_drawer[0][0]), tracker)
             lado1 = self._side_from_x_position(float(ordered_drawer[-1][0]), tracker)
             vetor_mesma_posse = lado0 is not None and lado1 is not None and lado0 == lado1
-        vector_pos = self._scoreboard_safe_text_pos(frame, 0)
-        cv2.putText(
-            frame,
-            f"[Vetor] Mesma Posse: {'Sim' if vetor_mesma_posse else 'Nao'}",
-            vector_pos,
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.7,
-            (255, 255, 0),
-            2,
-        )
-        posse_txt = "Posse: --"
-        posse_side = self.campo_posse_atual if self.campo_posse_atual in ("CampoA", "CampoB") else self.current_possession
-        if posse_side == "CampoA":
-            posse_txt = "Posse: Equipa A"
-        elif posse_side == "CampoB":
-            posse_txt = "Posse: Equipa B"
-        possession_pos = self._scoreboard_safe_text_pos(frame, 1)
-        cv2.putText(
-            frame,
-            posse_txt,
-            possession_pos,
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.7,
-            (0, 255, 0),
-            2,
-        )
+        if not getattr(config, "EVALUATION_MODE", False):
+            vector_pos = self._scoreboard_safe_text_pos(frame, 0)
+            cv2.putText(
+                frame,
+                f"[Vetor] Mesma Posse: {'Sim' if vetor_mesma_posse else 'Nao'}",
+                vector_pos,
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.7,
+                (255, 255, 0),
+                2,
+            )
+            posse_txt = "Posse: --"
+            posse_side = self.campo_posse_atual if self.campo_posse_atual in ("CampoA", "CampoB") else self.current_possession
+            if posse_side == "CampoA":
+                posse_txt = "Posse: Equipa A"
+            elif posse_side == "CampoB":
+                posse_txt = "Posse: Equipa B"
+            possession_pos = self._scoreboard_safe_text_pos(frame, 1)
+            cv2.putText(
+                frame,
+                posse_txt,
+                possession_pos,
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.7,
+                (0, 255, 0),
+                2,
+            )
 
         # 1) Side tracking (for block memory, a single frame in Campo B is enough).
         if ball_state.visible:

@@ -4,6 +4,7 @@ main.py
 Loop principal do sistema de analise de voleibol.
 """
 
+import argparse
 import cv2
 
 from analytics import AnalyticsEngine
@@ -14,9 +15,12 @@ from scoreboard_template_reader import ScoreboardReader
 from tracker import VolleyballTracker
 
 
-def main():
+def main(evaluation_mode: bool = False):
     config.ensure_dirs()
     H, net_line, score_roi = run_calibration(config, force=True)
+    if evaluation_mode:
+        config.EVALUATION_MODE = True
+        config.HEADLESS_MODE = True  # Força headless no modo avaliação
     if score_roi is not None:
         config.score_roi = tuple(score_roi)
 
@@ -74,7 +78,7 @@ def main():
             else:
                 trail_color = (0, 255, 0)
 
-        if not config.HEADLESS_MODE:
+        if not config.HEADLESS_MODE and not config.EVALUATION_MODE:
             render_analysis_overlay(
                 frame=frame,
                 detections=detections,
@@ -88,9 +92,9 @@ def main():
             key = cv2.waitKey(1) & 0xFF
             if key == 27:
                 break
-        else:
+        elif config.HEADLESS_MODE or config.EVALUATION_MODE:
             if frame_idx % max(int(fps * 5), 1) == 0:
-                print(f"[HEADLESS] frame {frame_idx} ts={frame_idx/fps:.2f}s")
+                print(f"[HEADLESS/EVALUATION] frame {frame_idx} ts={frame_idx/fps:.2f}s")
 
         frame_idx += 1
 
@@ -104,6 +108,26 @@ def main():
     print(f"CSV salvo em {out_csv.resolve()}")
     print(f"Eventos salvos em {config.event_store_file.resolve()}")
 
+    if config.EVALUATION_MODE:
+        # Exportar resumo das estatísticas
+        import json
+        stats_summary = {
+            "numero_rallies": len(analytics.rally_mgr.finished),
+            "numero_spikes": analytics.counts.get("POINT_BY_SPIKE", 0),
+            "numero_blocos": analytics.counts.get("POINT_BY_BLOCK", 0),
+            "numero_indefinidos": analytics.counts.get("OPPONENT_ERROR", 0) + analytics.counts.get("FREEBALL", 0) + analytics.counts.get("BOLA_NA_REDE", 0),
+            "pontos_equipa_A": analytics.ocr.stable_score[0] if analytics.ocr.stable_score else 0,
+            "pontos_equipa_B": analytics.ocr.stable_score[1] if analytics.ocr.stable_score else 0,
+            "score_final": f"{analytics.ocr.stable_score[0] if analytics.ocr.stable_score else 0}-{analytics.ocr.stable_score[1] if analytics.ocr.stable_score else 0}"
+        }
+        stats_file = config.output_dir / "stats_summary.json"
+        with open(stats_file, 'w') as f:
+            json.dump(stats_summary, f, indent=4)
+        print(f"Resumo das estatísticas salvo em {stats_file.resolve()}")
+
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description="Sistema de análise de voleibol")
+    parser.add_argument("--eval", action="store_true", help="Executar em modo de avaliação (sem interface visual)")
+    args = parser.parse_args()
+    main(evaluation_mode=args.eval)

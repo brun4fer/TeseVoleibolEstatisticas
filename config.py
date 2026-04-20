@@ -20,7 +20,7 @@ class Config:
     event_store_file: Path = Path("outputs/volleyball_events.json")
 
     # Time window (absolute timestamps in the video)
-    start_ts: str = "00:27:02"
+    start_ts: str = "00:37:02"
     end_ts: str = "00:46:17"
 
     # Models
@@ -92,6 +92,7 @@ class Config:
 
     # UI / execução
     HEADLESS_MODE: bool = False
+    EVALUATION_MODE: bool = False
     BALL_DEBUG_VISUAL: bool = True
     BALL_DEBUG_LOG: bool = False
     SHOW_BALL_DEBUG: bool = False
