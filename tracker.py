@@ -123,9 +123,16 @@ class VolleyballTracker:
         self.ball_drawer_jump_px: float = 700.0
         self.ball_drawer_jump_after_occlusion_px: float = 700.0
         self.ball_drawer_occlusion_frames: int = 5
-        self.ball_drawer_infill_min_missing_frames: int = 5
-        self.ball_drawer_infill_max_missing_frames: int = 10
+        # Fix 4: interpolação de trajetória para gaps curtos. Aplicamos para
+        # qualquer região do campo (não apenas zona da rede) quando o gap é
+        # curto e temos posição confirmada antes E depois do mesmo.
+        self.ball_drawer_infill_min_missing_frames: int = 2
+        self.ball_drawer_infill_max_missing_frames: int = 8
         self.ball_drawer_infill_net_dist_px: float = float(config.net_band_height_px) + 40.0
+        # Sidecar set com as chaves (x, y, t) de pontos interpolados — usado
+        # por consumidores que precisem distinguir pontos reais vs. interpolados
+        # (ex: classificação de spike/block deve ignorar interpolated=True).
+        self._interpolated_drawer_keys: set = set()
         self.ball_drawer_hold_s: float = 2.0
         self.ball_drawer_hold_until_ts: float = -1e9
         self.ball_drawer_clear_after_ts: Optional[float] = None
@@ -232,9 +239,13 @@ class VolleyballTracker:
 
         fg_mask = self.ball_core.build_foreground_mask(ball_frame)
         infer_size = max(ball_frame.shape[0], ball_frame.shape[1])
+        # Fix 1: usa o threshold adaptativo do core. Quando o tracker está
+        # estável o YOLO devolve só candidatos fortes; em frames sem deteção
+        # baixa progressivamente para recuperar a bola após oclusão/blur.
+        adaptive_conf = self.ball_core.current_conf_threshold()
         results = self.model.predict(
             source=ball_frame,
-            conf=self.ball_core.cfg.conf_threshold,
+            conf=adaptive_conf,
             imgsz=infer_size,
             device=self.yolo_device,
             verbose=False,
@@ -249,6 +260,22 @@ class VolleyballTracker:
                 decision = self.game_intelligence.evaluate_candidate(center, timestamp_s, frame_idx)
                 return decision.to_dict()
 
+        # Fix 5: marca se a última posição confirmada está na zona da rede
+        # (signed_distance_to_net < 1.5m). O core usa este flag para relaxar
+        # as gates de step/prediction-error em 50% nesta região.
+        previous_in_net_zone = False
+        prev_core_center = self.ball_core.previous_center
+        if prev_core_center is not None:
+            prev_full_px = scale_point(prev_core_center, scale_x, scale_y)
+            if prev_full_px is not None:
+                try:
+                    signed_dist_px = abs(self._signed_side(prev_full_px))
+                    ppm_near_net = self._meters_to_pixels_near_net(1.0) or 50.0
+                    signed_dist_m = signed_dist_px / max(ppm_near_net, 1e-6)
+                    previous_in_net_zone = bool(signed_dist_m < 1.5)
+                except Exception:
+                    previous_in_net_zone = False
+
         core_result = self.ball_core.update_from_yolo_result(
             res,
             ball_frame.shape,
@@ -256,6 +283,7 @@ class VolleyballTracker:
             fps=fps_value,
             pixels_per_meter=self.ball_core.cfg.pixels_per_meter,
             context_evaluator=context_evaluator,
+            previous_in_net_zone=previous_in_net_zone,
         )
         self.last_ball_core_result = core_result
 
@@ -445,6 +473,8 @@ class VolleyballTracker:
         self._prune_isolated_outlier()
         if len(self.ball_drawer) > self.ball_drawer_maxlen:
             overflow = len(self.ball_drawer) - self.ball_drawer_maxlen
+            for stale in self.ball_drawer[:overflow]:
+                self._interpolated_drawer_keys.discard(stale)
             del self.ball_drawer[:overflow]
         print(f"A adicionar à gaveta: {x}, {y}. Total agora: {len(self.ball_drawer)}")
 
@@ -466,6 +496,10 @@ class VolleyballTracker:
         return None
 
     def _infill_ball_drawer_gap_if_needed(self, x: float, y: float, t: float) -> None:
+        # Fix 4: preenche gaps curtos (≤ 8 frames) por interpolação linear
+        # entre a última posição conhecida e a posição reencontrada. Os pontos
+        # interpolados ficam marcados via sidecar set para que consumidores
+        # de event-classification (spike/block/ace) os possam ignorar.
         if not self.ball_drawer:
             return
         missing = int(self.frames_since_ball)
@@ -473,13 +507,6 @@ class VolleyballTracker:
             return
 
         last_x, last_y, last_t = self.ball_drawer[-1]
-        dist_last_net = self._dist_to_net_line((float(last_x), float(last_y)))
-        dist_now_net = self._dist_to_net_line((float(x), float(y)))
-        if min(dist_last_net, dist_now_net) > self.ball_drawer_infill_net_dist_px:
-            return
-
-        if missing <= 1:
-            return
 
         added = 0
         for i in range(1, missing):
@@ -494,15 +521,30 @@ class VolleyballTracker:
                 it = float(last_t + (float(t) - float(last_t)) * alpha)
             else:
                 it = float(last_t + (1e-3 * i))
-            self.ball_drawer.append((ix, iy, it))
+            entry = (ix, iy, it)
+            self.ball_drawer.append(entry)
+            self._interpolated_drawer_keys.add(entry)
             added += 1
 
         if added > 0:
             self._prune_isolated_outlier()
             if len(self.ball_drawer) > self.ball_drawer_maxlen:
                 overflow = len(self.ball_drawer) - self.ball_drawer_maxlen
+                # Limpa chaves do sidecar referentes a entradas removidas.
+                for stale in self.ball_drawer[:overflow]:
+                    self._interpolated_drawer_keys.discard(stale)
                 del self.ball_drawer[:overflow]
-            print(f"[INFILL] Gap de {missing} frames junto a rede. Pontos interpolados: {added}.")
+            print(
+                f"[INTERP] Preenchidos {added} frames por interpolação entre "
+                f"({last_x:.0f},{last_y:.0f}) e ({x:.0f},{y:.0f})"
+            )
+
+    def is_interpolated_drawer_point(self, point: Tuple[float, float, float]) -> bool:
+        """True se o ponto da gaveta foi inserido por interpolação (Fix 4).
+
+        Consumers que classifiquem spike/block/ace devem filtrar estes pontos.
+        """
+        return point in self._interpolated_drawer_keys
 
     def drawer_snapshot(self) -> List[Tuple[float, float, float]]:
         return self._ordered_ball_drawer()
@@ -574,6 +616,8 @@ class VolleyballTracker:
 
     def clear_ball_drawer(self) -> None:
         self.ball_drawer.clear()
+        # Fix 4: invalida sidecar de pontos interpolados ao iniciar novo rally.
+        self._interpolated_drawer_keys.clear()
         self.ball_drawer_hold_until_ts = -1e9
         self.ball_drawer_clear_after_ts = None
         self.tocou_rede = False
@@ -637,6 +681,7 @@ class VolleyballTracker:
         d12 = float(np.hypot(p2[0] - p1[0], p2[1] - p1[1]))
         d02 = float(np.hypot(p2[0] - p0[0], p2[1] - p0[1]))
         if d01 > self.ball_drawer_outlier_px and d12 > self.ball_drawer_outlier_px and d02 < self.ball_drawer_outlier_bridge_px:
+            self._interpolated_drawer_keys.discard(self.ball_drawer[-2])
             del self.ball_drawer[-2]
 
     def _ordered_ball_drawer(self) -> List[Tuple[float, float, float]]:

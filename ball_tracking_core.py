@@ -65,6 +65,64 @@ class BallTrackingConfig:
     static_fp_max_frames: int = 30
     static_fp_grid_px: int = 30
 
+    # --- Fix 1: Threshold adaptativo de confiança YOLO ---
+    # O threshold sobe quando o tracker está estável (poucos falsos positivos)
+    # e desce em períodos sem deteção (motion blur, oclusão, rede).
+    adaptive_conf_high: float = 0.35
+    adaptive_conf_mid: float = 0.20
+    adaptive_conf_low: float = 0.15
+    adaptive_conf_mid_after_misses: int = 5
+    adaptive_conf_low_after_misses: int = 15
+
+    # --- Fix 2: Zona de busca expandida após gap ---
+    # Após N frames sem deteção, expandimos as gates de step/prediction-error para
+    # evitar rejeitar a bola como "speed outlier" quando reaparece longe.
+    gap_search_expand_2x_after: int = 5
+    gap_search_expand_4x_after: int = 15
+
+    # --- Fix 3: Blacklist permanente de posições estáticas (FP persistente) ---
+    # Janela de N últimas deteções aceites; se ≥ min_hits estiverem dentro de
+    # radius_px da nova posição, classifica-se como FP estático persistente.
+    # Qualquer candidato futuro a < reject_radius_px é descartado para sempre.
+    position_blacklist_window: int = 60
+    position_blacklist_radius_px: float = 20.0
+    position_blacklist_min_hits: int = 40
+    position_blacklist_reject_radius_px: float = 25.0
+
+    # --- Fix 5: Tolerância especial na zona da rede ---
+    # Na zona da rede a bola muda de direção abruptamente em blocos/spikes.
+    # Relaxamos as gates de step/prediction-error nesta região.
+    net_zone_relax_factor: float = 1.5
+
+    # --- Sistema de scoring contínuo (substitui rejeição binária) ----------
+    # Cada candidato recebe um score em [0, 1+] composto por 5 componentes.
+    # A soma dos 5 pesos = 1.0 (ou 1.2 com boost na zona da rede).
+    score_weight_yolo: float = 0.25       # confiança do YOLO
+    score_weight_speed: float = 0.25      # consistência de velocidade
+    score_weight_motion: float = 0.20     # foreground/MOG2
+    score_weight_direction: float = 0.15  # consistência direcional (Kalman)
+    score_weight_static: float = 0.15     # penalidade gradual por staticidade
+
+    # Thresholds de decisão.
+    score_accept_threshold: float = 0.55          # >= : aceitar sempre
+    score_recovery_threshold: float = 0.35        # entre os dois: só em recovery
+    score_recovery_gap_frames: int = 10           # gap mínimo p/ recovery threshold
+    # Recovery total (zerar peso de speed e redistribuir): a partir deste gap.
+    score_full_recovery_gap_frames: int = 15
+
+    # Boost na zona da rede (signed_distance_to_net < score_net_zone_radius_m).
+    score_net_zone_boost: float = 1.20
+    score_net_zone_radius_m: float = 1.5
+
+    # Janela e raio para a penalidade gradual de staticidade.
+    score_static_window: int = 60
+    score_static_radius_px: float = 25.0
+    score_static_max_hits: int = 30   # >= esta contagem ⇒ penalidade = 1.0
+
+    # Conversão fg_ratio/fg_pixels → motion_score em [0, 1].
+    score_motion_ratio_scale: float = 5.0
+    score_motion_pixels_scale: float = 50.0
+
 
 DEFAULT_CONFIG = BallTrackingConfig()
 
@@ -360,9 +418,15 @@ def select_ball_candidate(
     older_center: Optional[Tuple[int, int]],
     cfg: BallTrackingConfig = DEFAULT_CONFIG,
     candidate_evaluator: Optional[Callable[[Dict], Dict]] = None,
+    search_multiplier: float = 1.0,
 ) -> Tuple[Optional[dict], str, Optional[dict]]:
+    # search_multiplier expande as gates de step/prediction-error:
+    #   1.0 → comportamento normal
+    #   >1.0 → tolerância maior (Fix 2 após gap, Fix 5 na zona da rede)
     if not candidates:
         return None, "missed_frame_no_valid_candidate", None
+    effective_max_step = float(cfg.max_step_pixels) * float(search_multiplier)
+    effective_max_pred_err = float(cfg.max_prediction_error_pixels) * float(search_multiplier)
 
     candidate_pool: List[dict] = []
     best_context_rejected: Optional[dict] = None
@@ -403,7 +467,7 @@ def select_ball_candidate(
         gated_candidates = [
             candidate
             for candidate in candidate_pool
-            if (pixel_distance(previous_center, candidate["center"]) or 0.0) <= cfg.max_step_pixels
+            if (pixel_distance(previous_center, candidate["center"]) or 0.0) <= effective_max_step
         ]
         if not gated_candidates:
             return None, "rejected_step_distance", best_context_rejected
@@ -423,17 +487,17 @@ def select_ball_candidate(
 
     for candidate in candidate_pool:
         step_distance = pixel_distance(previous_center, candidate["center"]) or 0.0
-        if step_distance > cfg.max_step_pixels:
+        if step_distance > effective_max_step:
             rejected_step_distance = True
             print(
                 f"[STEP-REJECT] Candidato rejeitado: {step_distance:.0f}px "
-                f"> max {cfg.max_step_pixels:.0f}px | "
+                f"> max {effective_max_step:.0f}px (mult={search_multiplier:.2f}) | "
                 f"{previous_center} → {candidate['center']}"
             )
             continue
 
         prediction_error = pixel_distance(predicted_center, candidate["center"]) or 0.0
-        if prediction_error > cfg.max_prediction_error_pixels:
+        if prediction_error > effective_max_pred_err:
             rejected_prediction_error = True
             continue
 
@@ -454,6 +518,245 @@ def select_ball_candidate(
         "selected_by_motion_gate",
         best_context_rejected,
     )
+
+
+def calc_static_penalty(
+    candidate: Dict,
+    accepted_position_history: Deque[Tuple[float, float]],
+    cfg: BallTrackingConfig = DEFAULT_CONFIG,
+) -> float:
+    """Penalidade gradual em [0, 1] por staticidade da posição.
+
+    Substitui a blacklist binária: quanto mais vezes a posição apareceu na
+    janela recente, mais penalidade. Saturamos a 1.0 ao atingir
+    score_static_max_hits ocorrências.
+    """
+    if not accepted_position_history:
+        return 0.0
+    cx, cy = float(candidate["center"][0]), float(candidate["center"][1])
+    radius = float(cfg.score_static_radius_px)
+    window = int(cfg.score_static_window)
+    history_slice = list(accepted_position_history)[-window:]
+    nearby = sum(
+        1
+        for (px, py) in history_slice
+        if abs(px - cx) < radius and abs(py - cy) < radius
+    )
+    max_hits = max(1, int(cfg.score_static_max_hits))
+    return min(1.0, nearby / float(max_hits))
+
+
+def score_candidate(
+    candidate: Dict,
+    *,
+    last_accepted_center: Optional[Tuple[int, int]],
+    older_center: Optional[Tuple[int, int]],
+    accepted_position_history: Deque[Tuple[float, float]],
+    gap_frames: int,
+    fps: float,
+    pixels_per_meter: float,
+    max_ball_speed_ms: float,
+    foreground_filter_active: bool,
+    in_net_zone: bool,
+    cfg: BallTrackingConfig = DEFAULT_CONFIG,
+) -> Tuple[float, Dict[str, float], bool]:
+    """Calcula o score contínuo [0, ~1.2] de um candidato.
+
+    Retorna (score, breakdown_dict, recovery_mode_used).
+
+    Componentes (pesos por defeito):
+      - yolo_conf  (0.25) → confiança directa do YOLO
+      - speed      (0.25) → 1 - speed/max_speed (degrada gradualmente)
+      - motion     (0.20) → activação de foreground (MOG2)
+      - direction  (0.15) → 1 - prediction_error/max_pred_err
+      - static     (0.15) → 1 - penalidade gradual de staticidade
+
+    Em recovery total (gap >= score_full_recovery_gap_frames), o peso de
+    speed é zerado e redistribuído metade-metade entre yolo_conf e motion.
+    Na zona da rede, o score final é multiplicado por score_net_zone_boost.
+    """
+    weights: Dict[str, float] = {}
+
+    full_recovery = int(gap_frames) >= int(cfg.score_full_recovery_gap_frames)
+
+    w_yolo = float(cfg.score_weight_yolo)
+    w_speed = float(cfg.score_weight_speed)
+    w_motion = float(cfg.score_weight_motion)
+    w_direction = float(cfg.score_weight_direction)
+    w_static = float(cfg.score_weight_static)
+
+    if full_recovery:
+        # Speed deixa de pesar; redistribuímos para yolo + motion.
+        half = w_speed / 2.0
+        w_yolo += half
+        w_motion += half
+        w_speed = 0.0
+
+    # 1. Confiança YOLO ----------------------------------------------------
+    conf = float(candidate.get("confidence", 0.0))
+    weights["yolo_conf"] = conf * w_yolo
+
+    # 2. Consistência de velocidade ---------------------------------------
+    speed_score = 1.0  # neutro quando ainda não há referência
+    speed_value_mps: Optional[float] = None
+    if w_speed > 0.0 and last_accepted_center is not None:
+        step_px = pixel_distance(last_accepted_center, candidate["center"]) or 0.0
+        if fps > 0 and pixels_per_meter > 0:
+            speed_value_mps = (step_px * float(fps)) / float(pixels_per_meter)
+            # Margem cresce 10% por frame de gap (recuperar bola distante).
+            max_speed = float(max_ball_speed_ms) * (1.0 + max(0, int(gap_frames)) * 0.1)
+            if max_speed > 0:
+                speed_score = max(0.0, 1.0 - (speed_value_mps / max_speed))
+    weights["speed"] = speed_score * w_speed
+
+    # 3. Movimento (foreground MOG2) --------------------------------------
+    if not foreground_filter_active:
+        # Sem máscara → componente neutra para não penalizar injustamente.
+        motion_score = 1.0
+    else:
+        fg_ratio = float(candidate.get("fg_active_ratio", 0.0))
+        fg_pixels = int(candidate.get("fg_active_pixels", 0))
+        motion_score = min(
+            1.0,
+            fg_ratio * float(cfg.score_motion_ratio_scale)
+            + fg_pixels / max(float(cfg.score_motion_pixels_scale), 1e-6),
+        )
+    weights["motion"] = motion_score * w_motion
+
+    # 4. Consistência direcional (Kalman/predição linear) -----------------
+    direction_score = 1.0
+    pred_err_value: Optional[float] = None
+    if last_accepted_center is not None and older_center is not None:
+        predicted = predict_next_center(last_accepted_center, older_center)
+        if predicted is not None:
+            pred_err_value = pixel_distance(predicted, candidate["center"]) or 0.0
+            max_err = float(cfg.max_prediction_error_pixels) * (
+                1.0 + max(0, int(gap_frames)) * 0.1
+            )
+            if max_err > 0:
+                direction_score = max(0.0, 1.0 - (pred_err_value / max_err))
+    weights["direction"] = direction_score * w_direction
+
+    # 5. Penalidade gradual de staticidade --------------------------------
+    static_penalty = calc_static_penalty(candidate, accepted_position_history, cfg)
+    weights["static"] = (1.0 - static_penalty) * w_static
+
+    score = sum(weights.values())
+
+    # Boost na zona da rede --------------------------------------------------
+    if in_net_zone:
+        score *= float(cfg.score_net_zone_boost)
+        weights["net_zone_boost"] = float(cfg.score_net_zone_boost)
+
+    # Anota debug no candidato (sobrescreve cost-based final_score sem o usar).
+    candidate["score_breakdown"] = dict(weights)
+    candidate["score"] = float(score)
+    candidate["score_speed_mps"] = speed_value_mps
+    candidate["score_pred_err"] = pred_err_value
+    candidate["score_static_penalty"] = static_penalty
+    candidate["score_full_recovery"] = bool(full_recovery)
+    candidate["score_in_net_zone"] = bool(in_net_zone)
+
+    return float(score), weights, bool(full_recovery)
+
+
+def select_ball_candidate_by_score(
+    candidates: List[Dict],
+    *,
+    last_accepted_center: Optional[Tuple[int, int]],
+    older_center: Optional[Tuple[int, int]],
+    accepted_position_history: Deque[Tuple[float, float]],
+    gap_frames: int,
+    fps: float,
+    pixels_per_meter: float,
+    max_ball_speed_ms: float,
+    foreground_filter_active: bool,
+    cfg: BallTrackingConfig = DEFAULT_CONFIG,
+    candidate_evaluator: Optional[Callable[[Dict], Dict]] = None,
+    net_zone_evaluator: Optional[Callable[[Tuple[int, int]], bool]] = None,
+) -> Tuple[Optional[Dict], str, Optional[Dict], float, bool]:
+    """Seleciona o candidato com maior score que passe o threshold.
+
+    Retorna: (escolhido, reason, melhor_rejeitado_por_contexto, score_top, recovery_used).
+
+    Threshold:
+      score >= score_accept_threshold (0.55)              → aceitar sempre
+      score_recovery_threshold (0.35) <= score < 0.55     → aceitar SE gap >= score_recovery_gap_frames
+                                                            (marca interpolated=True)
+      score < 0.35                                         → rejeitar
+    """
+    if not candidates:
+        return None, "missed_frame_no_valid_candidate", None, 0.0, False
+
+    candidate_pool: List[Dict] = []
+    best_context_rejected: Optional[Dict] = None
+    for candidate in candidates:
+        if candidate_evaluator is not None:
+            context = candidate_evaluator(candidate)
+            candidate["game_context"] = dict(context or {})
+            if bool((context or {}).get("reject", False)):
+                if best_context_rejected is None or float(candidate.get("confidence", 0.0)) > float(
+                    best_context_rejected.get("confidence", 0.0)
+                ):
+                    best_context_rejected = dict(candidate)
+                continue
+        candidate_pool.append(candidate)
+
+    if not candidate_pool:
+        return None, "rejected_by_game_context", best_context_rejected, 0.0, False
+
+    scored: List[Tuple[float, bool, Dict]] = []
+    for candidate in candidate_pool:
+        in_net = bool(net_zone_evaluator(candidate["center"])) if net_zone_evaluator else False
+        score, breakdown, full_recovery = score_candidate(
+            candidate,
+            last_accepted_center=last_accepted_center,
+            older_center=older_center,
+            accepted_position_history=accepted_position_history,
+            gap_frames=gap_frames,
+            fps=fps,
+            pixels_per_meter=pixels_per_meter,
+            max_ball_speed_ms=max_ball_speed_ms,
+            foreground_filter_active=foreground_filter_active,
+            in_net_zone=in_net,
+            cfg=cfg,
+        )
+        scored.append((score, full_recovery, candidate))
+        print(
+            f"[SCORE] center={candidate['center']} score={score:.3f} "
+            f"yolo={breakdown.get('yolo_conf', 0):.2f} speed={breakdown.get('speed', 0):.2f} "
+            f"motion={breakdown.get('motion', 0):.2f} dir={breakdown.get('direction', 0):.2f} "
+            f"static={breakdown.get('static', 0):.2f} net={'Y' if in_net else 'N'} "
+            f"gap={gap_frames} fullrec={full_recovery}"
+        )
+
+    scored.sort(key=lambda s: s[0], reverse=True)
+    top_score, top_full_recovery, top_candidate = scored[0]
+
+    accept_th = float(cfg.score_accept_threshold)
+    recover_th = float(cfg.score_recovery_threshold)
+    recover_gap = int(cfg.score_recovery_gap_frames)
+
+    if top_score >= accept_th:
+        print(f"[SCORE-ACCEPT] center={top_candidate['center']} score={top_score:.3f} >= {accept_th:.2f}")
+        return top_candidate, "selected_by_score", best_context_rejected, top_score, top_full_recovery
+
+    if top_score >= recover_th and int(gap_frames) >= recover_gap:
+        # Recovery: aceita com confiança degradada → marca interpolated=True
+        # para que classificadores de spike/block/ace o ignorem.
+        top_candidate["interpolated"] = True
+        print(
+            f"[RECOVERY-MODE] Ativado após {gap_frames} frames, "
+            f"threshold relaxado: aceite center={top_candidate['center']} "
+            f"score={top_score:.3f} (>= {recover_th:.2f})"
+        )
+        return top_candidate, "selected_by_score_recovery", best_context_rejected, top_score, True
+
+    print(
+        f"[SCORE-REJECT] center={top_candidate['center']} score={top_score:.3f} "
+        f"< {recover_th:.2f} (gap={gap_frames})"
+    )
+    return None, "rejected_by_score", best_context_rejected, top_score, False
 
 
 def draw_trajectory(
@@ -517,6 +820,16 @@ class BallTrackerCore:
         # Posições confirmadas como FP estático — rejeitadas permanentemente.
         self._static_fp_blacklist: Set[Tuple[int, int]] = set()
 
+        # Fix 3: histórico das últimas N posições aceites e blacklist persistente
+        # baseada em proximidade real (±radius_px), não em quantização em grelha.
+        self._accepted_position_history: Deque[Tuple[float, float]] = deque(
+            maxlen=int(cfg.position_blacklist_window)
+        )
+        self._position_blacklist: List[Tuple[float, float]] = []
+
+        # Fix 1: cache do último threshold de confiança imprimido para evitar log spam.
+        self._last_logged_conf: Optional[float] = None
+
     def reset(self, center: Optional[Tuple[int, int]] = None) -> None:
         self.previous_center = center
         self.older_center = None
@@ -530,6 +843,73 @@ class BallTrackerCore:
         self.last_result = None
         # Streak de FP estático reseta por rally; blacklist persiste (o objeto não se move).
         self._static_candidate_counts.clear()
+        # Histórico de posições aceites também reseta — a blacklist *permanece*
+        # (uma posição confirmada como FP estático nesta sessão continua a sê-lo).
+        self._accepted_position_history.clear()
+        self._last_logged_conf = None
+
+    # --- Fix 1: Threshold adaptativo de confiança YOLO ---------------------
+    def current_conf_threshold(self) -> float:
+        """Retorna o threshold YOLO efetivo em função do estado do tracker.
+
+        Estável → high (0.35). 5+ misses → mid (0.20). 15+ misses → low (0.15).
+        """
+        cfg = self.cfg
+        misses = int(self.missed_frames)
+        if misses >= int(cfg.adaptive_conf_low_after_misses):
+            new_conf = float(cfg.adaptive_conf_low)
+        elif misses >= int(cfg.adaptive_conf_mid_after_misses):
+            new_conf = float(cfg.adaptive_conf_mid)
+        else:
+            new_conf = float(cfg.adaptive_conf_high)
+        if self._last_logged_conf is None or abs(self._last_logged_conf - new_conf) > 1e-6:
+            if misses >= int(cfg.adaptive_conf_mid_after_misses):
+                print(
+                    f"[ADAPTIVE-CONF] Threshold baixado para {new_conf:.2f} "
+                    f"após {misses} frames sem deteção"
+                )
+            elif self._last_logged_conf is not None:
+                print(f"[ADAPTIVE-CONF] Threshold restaurado para {new_conf:.2f} (bola reencontrada)")
+            self._last_logged_conf = new_conf
+        return new_conf
+
+    # --- Fix 2: Multiplicador de busca em função do gap --------------------
+    def current_search_multiplier(self) -> float:
+        """Expande as gates de step/prediction-error após gaps longos."""
+        cfg = self.cfg
+        misses = int(self.missed_frames)
+        if misses >= int(cfg.gap_search_expand_4x_after):
+            return 4.0
+        if misses >= int(cfg.gap_search_expand_2x_after):
+            return 2.0
+        return 1.0
+
+    # --- Fix 3: Blacklist por proximidade real (±radius_px) ----------------
+    def _candidate_in_blacklist(self, center: Tuple[int, int]) -> bool:
+        if not self._position_blacklist:
+            return False
+        r = float(self.cfg.position_blacklist_reject_radius_px)
+        cx, cy = float(center[0]), float(center[1])
+        for bx, by in self._position_blacklist:
+            if math.hypot(cx - bx, cy - by) <= r:
+                return True
+        return False
+
+    def _filter_blacklisted_candidates(self, candidates: List[Dict]) -> List[Dict]:
+        if not self._position_blacklist:
+            return candidates
+        return [c for c in candidates if not self._candidate_in_blacklist(c["center"])]
+
+    def _register_accepted_position(self, center: Tuple[int, int]) -> None:
+        """Adiciona a deteção aceite ao histórico — fonte da static_penalty.
+
+        A blacklist binária foi substituída pela penalidade gradual em
+        `score_candidate`/`calc_static_penalty`. Mantemos apenas o histórico
+        de posições aceites (deque com janela `position_blacklist_window`),
+        que é exatamente o sinal usado pela static_penalty.
+        """
+        cx, cy = float(center[0]), float(center[1])
+        self._accepted_position_history.append((cx, cy))
 
     def build_foreground_mask(self, frame):
         if self.bg_subtractor is None:
@@ -592,18 +972,40 @@ class BallTrackerCore:
         fps: float,
         pixels_per_meter: Optional[float] = None,
         context_evaluator: Optional[Callable[[Dict], Dict]] = None,
+        previous_in_net_zone: bool = False,
+        net_zone_evaluator: Optional[Callable[[Tuple[int, int]], bool]] = None,
+        max_ball_speed_ms: Optional[float] = None,
     ) -> BallTrackResult:
+        # `previous_in_net_zone` permanece para compatibilidade. O sistema de
+        # scoring usa `net_zone_evaluator(center)` por candidato (boost ×1.2).
         cfg = self.cfg
         ppm = cfg.pixels_per_meter if pixels_per_meter is None else float(pixels_per_meter)
+        max_speed_ms = float(max_ball_speed_ms) if max_ball_speed_ms is not None else 35.0
         predicted_before = predict_next_center(self.previous_center, self.older_center)
         ball_candidates, candidate_stats = get_ball_candidates(result, frame_shape, fg_mask, cfg)
-        ball_candidates = self._filter_and_update_static_fp(ball_candidates)
-        detection, selection_reason, context_rejected_candidate = select_ball_candidate(
-            ball_candidates,
-            self.previous_center,
-            self.older_center,
-            cfg,
-            candidate_evaluator=context_evaluator,
+        # Os filtros binários antigos (static_fp grid, position blacklist) foram
+        # substituídos pela penalidade gradual `static_penalty` no scoring.
+        # O método `_filter_and_update_static_fp` é mantido em código mas já
+        # não é chamado no caminho principal.
+
+        gap_frames = int(self.missed_frames)
+        foreground_filter_active = bool(candidate_stats.get("foreground_filter_active", False))
+
+        detection, selection_reason, context_rejected_candidate, top_score, recovery_used = (
+            select_ball_candidate_by_score(
+                ball_candidates,
+                last_accepted_center=self.previous_center,
+                older_center=self.older_center,
+                accepted_position_history=self._accepted_position_history,
+                gap_frames=gap_frames,
+                fps=float(fps) if fps else 30.0,
+                pixels_per_meter=float(ppm),
+                max_ball_speed_ms=max_speed_ms,
+                foreground_filter_active=foreground_filter_active,
+                cfg=cfg,
+                candidate_evaluator=context_evaluator,
+                net_zone_evaluator=net_zone_evaluator,
+            )
         )
         context_decision: Optional[Dict] = None
         if detection is not None:
@@ -634,60 +1036,32 @@ class BallTrackerCore:
         if detection is None:
             self._register_miss()
         else:
+            # O selector baseado em score já decidiu: confiamos na sua decisão.
+            # Velocidade/staticidade são componentes contínuas do score, não
+            # gates binárias adicionais (manter gates duplicaria a rejeição que
+            # o score já incorporou de forma graduada).
             current_center = detection["center"]
-
-            if self.previous_center is not None:
-                movement_pixels = pixel_distance(self.previous_center, current_center)
+            speed_px = pixel_distance(self.previous_center, current_center)
+            if self.previous_center is not None and fps and ppm:
                 _dist_px, _speed_pxps, _speed_mps, raw_speed_kmh = calculate_speed(
                     self.previous_center,
                     current_center,
                     fps,
                     ppm,
                 )
-                speed_px = movement_pixels
+                self.speed_history_kmh.append(raw_speed_kmh)
 
-                if raw_speed_kmh <= cfg.max_speed_kmh:
-                    if movement_pixels is not None and movement_pixels < cfg.min_movement_pixels:
-                        self.stationary_counter += 1
-                    else:
-                        self.stationary_counter = 0
-
-                    if self.stationary_counter >= cfg.max_stationary_frames:
-                        ignored_stationary = True
-                    elif cfg.use_min_speed_filter and raw_speed_kmh < cfg.min_valid_speed_kmh:
-                        ignored_low_speed = True
-                    else:
-                        self.speed_history_kmh.append(raw_speed_kmh)
-                        self.older_center = self.previous_center
-                        self.previous_center = current_center
-                        self.last_accepted_center = current_center
-                        self.missed_frames = 0
-                        self.trajectory.append(current_center)
-                        detection_accepted = True
-                        if movement_pixels is None or movement_pixels >= cfg.min_movement_pixels:
-                            self.stationary_counter = 0
-                else:
-                    ignored_jump = True
-                    print(
-                        f"[SPEED-REJECT] Salto impossível (pixels): "
-                        f"{movement_pixels:.0f}px = {raw_speed_kmh:.0f}km/h "
-                        f"(max={cfg.max_speed_kmh:.0f}km/h) "
-                        f"{self.previous_center} → {current_center}"
-                    )
-            else:
-                self.older_center = self.previous_center
-                self.previous_center = current_center
-                self.last_accepted_center = current_center
-                self.stationary_counter = 0
-                self.missed_frames = 0
-                self.trajectory.append(current_center)
-                detection_accepted = True
-
-            if not detection_accepted:
-                self._register_miss()
-            else:
-                accepted_detection = dict(detection)
-                accepted_center = current_center
+            self.older_center = self.previous_center
+            self.previous_center = current_center
+            self.last_accepted_center = current_center
+            self.stationary_counter = 0
+            self.missed_frames = 0
+            self.trajectory.append(current_center)
+            # Mantém o histórico de posições aceites para a static_penalty.
+            self._register_accepted_position(current_center)
+            detection_accepted = True
+            accepted_detection = dict(detection)
+            accepted_center = current_center
 
             if self.speed_history_kmh:
                 displayed_speed_kmh = sum(self.speed_history_kmh) / len(self.speed_history_kmh)
