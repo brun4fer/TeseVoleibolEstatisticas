@@ -37,12 +37,12 @@ from ball_tracking_core import (
 )
 
 
-MODEL_PATH = Path("runs/detect/train5/weights/best.pt")
+MODEL_PATH = Path("runs/detect/train6/weights/best.pt")
 VIDEO_PATH = Path(
     r"C:/Users/Utilizador/Desktop/Mestrado/Tese/VideosJogos/VideoAcademica.mp4"
 )
 
-START_TIME = "00:36:57"
+START_TIME = "00:37:17"
 END_TIME = "00:46:17"
 
 BALL_CONFIG = BallTrackingConfig()

@@ -4,9 +4,9 @@ import shutil
 
 VIDEO_PATH = r"C:\Users\Utilizador\Desktop\Mestrado\Tese\VideosJogos\VideoAcademica.mp4"
 OUTPUT_DIR = "frames"
-MAX_IMAGES = 1000
+MAX_IMAGES = 300
 
-START_TIME = "00:29:02"
+START_TIME = "00:36:02"
 
 def time_to_seconds(t):
     h, m, s = map(int, t.split(":"))
@@ -29,20 +29,28 @@ cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
 
 frame_count = 0
 saved_count = 0
+last_print_time = 0
+frames_per_5s = int(5 * fps)  # 150 frames para 30 fps
 
 while True:
     ret, frame = cap.read()
     if not ret or saved_count >= MAX_IMAGES:
         break
 
-    # 🔥 guardar 1 a cada 3 frames (melhor variedade)
-    if frame_count % 3 == 0:
+    # 🔥 guardar 1 a cada 5 segundos (150 frames)
+    if frame_count % frames_per_5s == 0:
         filename = os.path.join(OUTPUT_DIR, f"frame_{saved_count}.jpg")
         cv2.imwrite(filename, frame)
         saved_count += 1
+
+    # 🔥 print a cada 5 segundos
+    current_time = (start_frame + frame_count) / fps
+    if current_time - last_print_time >= 5:
+        print(f"Frames guardados até agora: {saved_count} (tempo: {current_time:.1f}s)")
+        last_print_time = current_time
 
     frame_count += 1
 
 cap.release()
 
-print(f"Frames guardados: {saved_count}")
+print(f"Total frames guardados: {saved_count}")
