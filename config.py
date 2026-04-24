@@ -20,7 +20,7 @@ class Config:
     event_store_file: Path = Path("outputs/volleyball_events.json")
 
     # Time window (absolute timestamps in the video)
-    start_ts: str = "00:37:05"
+    start_ts: str = "00:37:12"
     end_ts: str = "00:46:17"
 
     # Models
