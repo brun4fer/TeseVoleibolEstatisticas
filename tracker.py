@@ -260,21 +260,30 @@ class VolleyballTracker:
                 decision = self.game_intelligence.evaluate_candidate(center, timestamp_s, frame_idx)
                 return decision.to_dict()
 
-        # Fix 5: marca se a última posição confirmada está na zona da rede
-        # (signed_distance_to_net < 1.5m). O core usa este flag para relaxar
-        # as gates de step/prediction-error em 50% nesta região.
-        previous_in_net_zone = False
-        prev_core_center = self.ball_core.previous_center
-        if prev_core_center is not None:
-            prev_full_px = scale_point(prev_core_center, scale_x, scale_y)
-            if prev_full_px is not None:
-                try:
-                    signed_dist_px = abs(self._signed_side(prev_full_px))
-                    ppm_near_net = self._meters_to_pixels_near_net(1.0) or 50.0
-                    signed_dist_m = signed_dist_px / max(ppm_near_net, 1e-6)
-                    previous_in_net_zone = bool(signed_dist_m < 1.5)
-                except Exception:
-                    previous_in_net_zone = False
+        # Boost de zona da rede para o scoring (avalia cada candidato em
+        # coords full-frame via signed_distance_to_net).
+        net_zone_radius_m = float(self.ball_core.cfg.score_net_zone_radius_m)
+        ppm_near_net = self._meters_to_pixels_near_net(1.0) or 50.0
+        net_zone_radius_px = float(net_zone_radius_m) * float(ppm_near_net)
+
+        def net_zone_evaluator(center_resized: Tuple[int, int]) -> bool:
+            full_pt = scale_point(center_resized, scale_x, scale_y)
+            if full_pt is None:
+                return False
+            try:
+                return abs(self._signed_side(full_pt)) < net_zone_radius_px
+            except Exception:
+                return False
+
+        # Conversor pixel→court(metros) via homografia. Usado pelo scoring e
+        # pela velocidade de display para calcular distância REAL em metros
+        # (não em pixels), corrigindo automaticamente a perspectiva — longe
+        # da câmara 1 px = mais metros, perto da câmara 1 px = menos metros.
+        def pixel_to_court_m(center_resized: Tuple[int, int]) -> Tuple[float, float]:
+            full_pt = scale_point(center_resized, scale_x, scale_y)
+            return self.geometry.pixel_to_court(full_pt)
+
+        max_ball_speed_ms = float(getattr(config, "max_ball_speed_ms", 35.0))
 
         core_result = self.ball_core.update_from_yolo_result(
             res,
@@ -283,7 +292,9 @@ class VolleyballTracker:
             fps=fps_value,
             pixels_per_meter=self.ball_core.cfg.pixels_per_meter,
             context_evaluator=context_evaluator,
-            previous_in_net_zone=previous_in_net_zone,
+            net_zone_evaluator=net_zone_evaluator,
+            max_ball_speed_ms=max_ball_speed_ms,
+            pixel_to_court_m=pixel_to_court_m,
         )
         self.last_ball_core_result = core_result
 

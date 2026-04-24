@@ -559,6 +559,7 @@ def score_candidate(
     foreground_filter_active: bool,
     in_net_zone: bool,
     cfg: BallTrackingConfig = DEFAULT_CONFIG,
+    pixel_to_court_m: Optional[Callable[[Tuple[int, int]], Tuple[float, float]]] = None,
 ) -> Tuple[float, Dict[str, float], bool]:
     """Calcula o score contínuo [0, ~1.2] de um candidato.
 
@@ -597,12 +598,27 @@ def score_candidate(
     weights["yolo_conf"] = conf * w_yolo
 
     # 2. Consistência de velocidade ---------------------------------------
+    # Usa a HOMOGRAFIA quando disponível (pixel_to_court_m) → distância em
+    # metros reais, independente da perspectiva. Longe da câmara, 1 px ≈ muitos
+    # metros; perto, 1 px ≈ poucos cm. Sem o callback, fallback para o
+    # pixels_per_meter fixo (errado por perspectiva, mas previsível).
     speed_score = 1.0  # neutro quando ainda não há referência
     speed_value_mps: Optional[float] = None
-    if w_speed > 0.0 and last_accepted_center is not None:
-        step_px = pixel_distance(last_accepted_center, candidate["center"]) or 0.0
-        if fps > 0 and pixels_per_meter > 0:
+    if w_speed > 0.0 and last_accepted_center is not None and fps > 0:
+        if pixel_to_court_m is not None:
+            try:
+                last_xy = pixel_to_court_m(last_accepted_center)
+                curr_xy = pixel_to_court_m(candidate["center"])
+                court_dist_m = math.hypot(curr_xy[0] - last_xy[0], curr_xy[1] - last_xy[1])
+                # Tempo entre observações = frames decorridos (gap+1) / fps.
+                dt_s = max((max(0, int(gap_frames)) + 1) / float(fps), 1.0 / 240.0)
+                speed_value_mps = court_dist_m / dt_s
+            except Exception:
+                speed_value_mps = None
+        if speed_value_mps is None and pixels_per_meter > 0:
+            step_px = pixel_distance(last_accepted_center, candidate["center"]) or 0.0
             speed_value_mps = (step_px * float(fps)) / float(pixels_per_meter)
+        if speed_value_mps is not None:
             # Margem cresce 10% por frame de gap (recuperar bola distante).
             max_speed = float(max_ball_speed_ms) * (1.0 + max(0, int(gap_frames)) * 0.1)
             if max_speed > 0:
@@ -674,6 +690,7 @@ def select_ball_candidate_by_score(
     cfg: BallTrackingConfig = DEFAULT_CONFIG,
     candidate_evaluator: Optional[Callable[[Dict], Dict]] = None,
     net_zone_evaluator: Optional[Callable[[Tuple[int, int]], bool]] = None,
+    pixel_to_court_m: Optional[Callable[[Tuple[int, int]], Tuple[float, float]]] = None,
 ) -> Tuple[Optional[Dict], str, Optional[Dict], float, bool]:
     """Seleciona o candidato com maior score que passe o threshold.
 
@@ -720,6 +737,7 @@ def select_ball_candidate_by_score(
             foreground_filter_active=foreground_filter_active,
             in_net_zone=in_net,
             cfg=cfg,
+            pixel_to_court_m=pixel_to_court_m,
         )
         scored.append((score, full_recovery, candidate))
         print(
@@ -975,6 +993,7 @@ class BallTrackerCore:
         previous_in_net_zone: bool = False,
         net_zone_evaluator: Optional[Callable[[Tuple[int, int]], bool]] = None,
         max_ball_speed_ms: Optional[float] = None,
+        pixel_to_court_m: Optional[Callable[[Tuple[int, int]], Tuple[float, float]]] = None,
     ) -> BallTrackResult:
         # `previous_in_net_zone` permanece para compatibilidade. O sistema de
         # scoring usa `net_zone_evaluator(center)` por candidato (boost ×1.2).
@@ -1005,6 +1024,7 @@ class BallTrackerCore:
                 cfg=cfg,
                 candidate_evaluator=context_evaluator,
                 net_zone_evaluator=net_zone_evaluator,
+                pixel_to_court_m=pixel_to_court_m,
             )
         )
         context_decision: Optional[Dict] = None
@@ -1042,14 +1062,29 @@ class BallTrackerCore:
             # o score já incorporou de forma graduada).
             current_center = detection["center"]
             speed_px = pixel_distance(self.previous_center, current_center)
-            if self.previous_center is not None and fps and ppm:
-                _dist_px, _speed_pxps, _speed_mps, raw_speed_kmh = calculate_speed(
-                    self.previous_center,
-                    current_center,
-                    fps,
-                    ppm,
-                )
-                self.speed_history_kmh.append(raw_speed_kmh)
+            if self.previous_center is not None and fps:
+                # Velocidade em metros reais via homografia (corrige perspectiva).
+                # Fallback para `calculate_speed` (pixels_per_meter fixo) só se
+                # o callback não estiver disponível.
+                raw_speed_kmh = None
+                if pixel_to_court_m is not None:
+                    try:
+                        prev_xy = pixel_to_court_m(self.previous_center)
+                        curr_xy = pixel_to_court_m(current_center)
+                        court_dist_m = math.hypot(curr_xy[0] - prev_xy[0], curr_xy[1] - prev_xy[1])
+                        dt_s = max((max(0, gap_frames) + 1) / float(fps), 1.0 / 240.0)
+                        raw_speed_kmh = (court_dist_m / dt_s) * 3.6
+                    except Exception:
+                        raw_speed_kmh = None
+                if raw_speed_kmh is None and ppm:
+                    _dist_px, _speed_pxps, _speed_mps, raw_speed_kmh = calculate_speed(
+                        self.previous_center,
+                        current_center,
+                        fps,
+                        ppm,
+                    )
+                if raw_speed_kmh is not None:
+                    self.speed_history_kmh.append(raw_speed_kmh)
 
             self.older_center = self.previous_center
             self.previous_center = current_center

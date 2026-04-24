@@ -20,12 +20,12 @@ class Config:
     event_store_file: Path = Path("outputs/volleyball_events.json")
 
     # Time window (absolute timestamps in the video)
-    start_ts: str = "00:36:57"
+    start_ts: str = "00:37:05"
     end_ts: str = "00:46:17"
 
     # Models
     yolo_model: str = "yolov8s.pt"  # modelo small para melhor detecção de bola
-    ball_yolo_model: str = "runs/detect/train5/weights/best.pt"
+    ball_yolo_model: str = "runs/detect/train6/weights/best.pt"
     score_reader_lang: Tuple[str, ...] = ("en",)
 
     # Detection thresholds
@@ -123,6 +123,13 @@ class Config:
     GAME_RULES_SUPPRESS_DUBIOUS_BALL_FOR_ANALYTICS: bool = True
     GAME_RULES_DEBUG_VISUAL: bool = True
     GAME_RULES_DEBUG_LOG: bool = False
+    # Rejeição binária por velocidade na camada de regras: desligada porque
+    # a homografia projecta a bola (no ar) sobre o plano do chão e infla
+    # qualquer movimento vertical em distância "no chão" → cascatas falsas.
+    # O `speed_score` em ball_tracking_core trata isto de forma graduada
+    # (também via homografia). Re-activar só se observares falsos positivos
+    # claramente impossíveis a passarem pelo scoring.
+    GAME_RULES_PHYSICS_REJECT_ENABLED: bool = False
     BLOCK_DEBUG_VISUAL: bool = True
     BLOCK_DEBUG_LOG: bool = False
     game_net_neutral_px: float = 15.0

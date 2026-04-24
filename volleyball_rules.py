@@ -50,6 +50,14 @@ class VolleyballRulesConfig:
     # Velocidade máxima física de uma bola de voleibol (~126 km/h).
     # Qualquer candidato que implique velocidade superior é rejeitado.
     max_ball_speed_ms: float = 35.0
+    # Rejeição binária por velocidade ao nível das regras.
+    # DESACTIVADO por defeito: a homografia projecta a bola (no ar) sobre o
+    # plano do chão, inflando a "distância em metros" sempre que a bola sobe
+    # ou desce verticalmente — gera cascatas de PHYSICS-REJECT em jogadas
+    # normais. O sistema de scoring em ball_tracking_core.py já tem uma
+    # componente de velocidade graduada (com homografia também) que penaliza
+    # candidatos rápidos sem rejeitar binariamente.
+    physics_reject_enabled: bool = False
 
     @classmethod
     def from_config(cls, config) -> "VolleyballRulesConfig":
@@ -80,6 +88,7 @@ class VolleyballRulesConfig:
             out_of_bounds_margin_m=float(getattr(config, "game_ball_out_of_bounds_margin_m", getattr(config, "court_margin_m", 0.75))),
             out_of_bounds_penalty=float(getattr(config, "game_ball_out_of_bounds_penalty", 120.0)),
             max_ball_speed_ms=float(getattr(config, "max_ball_speed_ms", 35.0)),
+            physics_reject_enabled=bool(getattr(config, "GAME_RULES_PHYSICS_REJECT_ENABLED", False)),
         )
 
 
@@ -312,9 +321,13 @@ class VolleyballGameIntelligence:
                     reasons.append(f"impossible_step:{step_px:.0f}>{max_step:.0f}")
 
             # --- Validação física em metros reais (homografia calibrada + timestamps) ---
-            # Calcula a distância em court-space (metros) entre a posição anterior
-            # e o candidato atual. Se a velocidade implícita exceder o máximo físico
-            # de uma bola de voleibol, o candidato é rejeitado como leitura impossível.
+            # A distância em court-space é calculada para debug/telemetria, mas
+            # a rejeição binária só corre se `physics_reject_enabled=True`.
+            # Por defeito: desligada — o `score_candidate` em ball_tracking_core
+            # tem componente de velocidade graduada (também via homografia) que
+            # penaliza sem produzir cascatas de rejeição quando a bola está no
+            # ar (a homografia de chão infla artificialmente a distância para
+            # qualquer movimento vertical real da bola).
             if timestamp_s is not None and self.last_observed_ts is not None:
                 time_elapsed_s = max(float(timestamp_s) - float(self.last_observed_ts), 1.0 / 120.0)
                 last_court = self.geometry.pixel_to_court(self.last_observed_center)
@@ -325,7 +338,7 @@ class VolleyballGameIntelligence:
                 required_speed_ms = court_dist_m / time_elapsed_s
                 debug["court_dist_m"] = round(court_dist_m, 3)
                 debug["required_speed_ms"] = round(required_speed_ms, 1)
-                if required_speed_ms > self.cfg.max_ball_speed_ms:
+                if self.cfg.physics_reject_enabled and required_speed_ms > self.cfg.max_ball_speed_ms:
                     penalty += self.cfg.impossible_step_penalty
                     reasons.append(
                         f"impossible_physical_speed:{required_speed_ms:.1f}m/s"
