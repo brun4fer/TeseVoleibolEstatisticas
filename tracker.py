@@ -720,6 +720,7 @@ class VolleyballTracker:
             self.last_visible_ball = {
                 "pt": (float(ball_state.pixel[0]), float(ball_state.pixel[1])),
                 "vx": float(ball_state.vx),
+                "vy": float(ball_state.vy),
                 "frame_idx": frame_idx,
                 "ts": timestamp_s,
             }
@@ -916,6 +917,30 @@ class VolleyballTracker:
             return False
         return vx_before * vx_after < 0
 
+    def _is_vy_inversion(self, vy_before: float, vy_after: float) -> bool:
+        # Inversão vertical: bola vinha a subir (vy<0 em coords de imagem) e
+        # passou a descer (vy>0), ou vice-versa. Usa o mesmo limiar mínimo
+        # do `_is_vx_inversion` por simetria. Apanha blocks "altos" em que o
+        # toque acontece com a bola perto do topo da rede e ela cai depois.
+        if abs(vy_before) < self.block_min_vx_px or abs(vy_after) < self.block_min_vx_px:
+            return False
+        return vy_before * vy_after < 0
+
+    def _is_velocity_inversion(
+        self,
+        vx_before: float,
+        vx_after: float,
+        vy_before: float,
+        vy_after: float,
+    ) -> bool:
+        # Verdadeiro se HOUVER inversão num dos eixos (x ou y). Em blocks
+        # reais a inversão pode ser horizontal (bola devolvida para o atacante),
+        # vertical (bola toca em cima e cai), ou mista.
+        return (
+            self._is_vx_inversion(vx_before, vx_after)
+            or self._is_vy_inversion(vy_before, vy_after)
+        )
+
     def _teams_from_incoming_vx(self, incoming_vx: float) -> Tuple[str, str]:
         attacking = "TeamA" if incoming_vx > 0 else "TeamB"
         defending = "TeamB" if attacking == "TeamA" else "TeamA"
@@ -980,7 +1005,12 @@ class VolleyballTracker:
         p2 = (float(self.trail[-1][0]), float(self.trail[-1][1]))
         vx_before = p1[0] - p0[0]
         vx_after = p2[0] - p1[0]
-        if not self._is_vx_inversion(vx_before, vx_after):
+        vy_before = p1[1] - p0[1]
+        vy_after = p2[1] - p1[1]
+        # Aceita inversão horizontal OU vertical: blocks "altos" produzem
+        # frequentemente inversão em y (bola sobe, toca em mãos, cai) sem
+        # inverter x.
+        if not self._is_velocity_inversion(vx_before, vx_after, vy_before, vy_after):
             return None
         if not self._segment_intersects_net(p1, p2, float(config.net_line_tolerance_px)):
             return None
@@ -1002,11 +1032,15 @@ class VolleyballTracker:
         if not self.ball_on_net_line(pre_pt):
             return
         pre_vx = float(self.last_visible_ball["vx"])
-        if abs(pre_vx) < self.block_min_vx_px:
+        pre_vy = float(self.last_visible_ball.get("vy", 0.0))
+        # Aceita oclusão se houver movimento minimo em x OU y (block alto
+        # pode ter vx≈0 mas vy alto enquanto a bola sobe para o toque).
+        if abs(pre_vx) < self.block_min_vx_px and abs(pre_vy) < self.block_min_vx_px:
             return
         self.pending_net_occlusion = {
             "pre_pt": pre_pt,
             "pre_vx": pre_vx,
+            "pre_vy": pre_vy,
             "pre_side": self._signed_side(pre_pt),
             "start_frame": frame_idx,
             "start_ts": timestamp_s,
@@ -1031,23 +1065,38 @@ class VolleyballTracker:
 
         re_pt = (float(ball_state.pixel[0]), float(ball_state.pixel[1]))
         re_vx = float(ball_state.vx)
-        if abs(re_vx) < self.block_min_vx_px:
+        re_vy = float(ball_state.vy)
+        # Aceita re-aparição com movimento minimo em x OU y.
+        if abs(re_vx) < self.block_min_vx_px and abs(re_vy) < self.block_min_vx_px:
             self.pending_net_occlusion = None
             return None
 
         pre_pt = (float(occl["pre_pt"][0]), float(occl["pre_pt"][1]))
         pre_vx = float(occl["pre_vx"])
+        pre_vy = float(occl.get("pre_vy", 0.0))
         pre_side = float(occl["pre_side"])
         re_side = self._signed_side(re_pt)
         opposite_side = pre_side * re_side < 0
         crossed_net = self._segment_intersects_net(pre_pt, re_pt, float(config.net_line_tolerance_px))
-        inversion = self._is_vx_inversion(pre_vx, re_vx)
+        # Aceita inversão em x OU y. Para blocks altos a inversão é vertical
+        # (bola sobe e cai depois do toque), sem necessariamente cruzar a rede.
+        inversion = self._is_velocity_inversion(pre_vx, re_vx, pre_vy, re_vy)
         contact_px = pre_pt if self._dist_to_net_line(pre_pt) <= self._dist_to_net_line(re_pt) else re_pt
         impact_px = self._impact_point_on_net(pre_pt, re_pt)
         height_ok = self._height_filter_ok(contact_px)
 
         self.pending_net_occlusion = None
-        if not (opposite_side and crossed_net and inversion and height_ok):
+        # Para blocks altos (inversão só em y), `crossed_net` e `opposite_side`
+        # podem não acontecer (a bola pode cair do mesmo lado). Aceitamos se a
+        # geometria estiver OK e houve inversão, mesmo sem cruzamento de rede.
+        block_high_pattern = (
+            inversion
+            and height_ok
+            and self._is_vy_inversion(pre_vy, re_vy)
+            and not self._is_vx_inversion(pre_vx, re_vx)
+        )
+        block_classic_pattern = opposite_side and crossed_net and inversion and height_ok
+        if not (block_classic_pattern or block_high_pattern):
             return None
 
         defender_side = self._defender_side(pre_pt)

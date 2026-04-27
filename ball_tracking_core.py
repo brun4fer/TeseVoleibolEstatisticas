@@ -115,8 +115,12 @@ class BallTrackingConfig:
     score_net_zone_radius_m: float = 1.5
 
     # Janela e raio para a penalidade gradual de staticidade.
+    # Raio pequeno (~8 px) para distinguir um FP fixo (que repete o MESMO
+    # pixel) de uma bola num rally lento (que varre uma área de ±25 px sem
+    # estar parada). Antes (25 px) penalizava bolas legítimas e perdia
+    # frames críticos no momento da reversão.
     score_static_window: int = 60
-    score_static_radius_px: float = 25.0
+    score_static_radius_px: float = 8.0
     score_static_max_hits: int = 30   # >= esta contagem ⇒ penalidade = 1.0
 
     # Conversão fg_ratio/fg_pixels → motion_score em [0, 1].
@@ -1123,6 +1127,13 @@ class BallTrackerCore:
             accepted_detection["speed_kmh"] = displayed_speed_kmh
             accepted_detection["speed_px"] = speed_px
             accepted_detection["speed_px_mean"] = 0.0
+            # Propaga score/recovery: interpolated=True faz com que classifi-
+            # cadores de spike/block/ace ignorem este ponto se quiserem.
+            accepted_detection["score"] = float(top_score)
+            accepted_detection["score_breakdown"] = dict(detection.get("score_breakdown") or {})
+            accepted_detection["recovery_used"] = bool(recovery_used)
+            if recovery_used or bool(detection.get("interpolated", False)):
+                accepted_detection["interpolated"] = True
             if len(self.trajectory) >= 2:
                 speeds = [
                     pixel_distance(self.trajectory[i - 1], self.trajectory[i]) or 0.0
@@ -1154,6 +1165,9 @@ class BallTrackerCore:
                 "predicted_after": predicted_after,
                 "candidate_debug": candidate_debug_string(selected_candidate) if selected_candidate is not None else None,
                 "game_context": dict(context_decision) if context_decision is not None else None,
+                "score_top": float(top_score),
+                "score_breakdown": dict((selected_candidate or {}).get("score_breakdown") or {}),
+                "recovery_used": bool(recovery_used),
             },
         )
         self.last_result = result_obj

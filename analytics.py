@@ -20,7 +20,16 @@ import pandas as pd
 
 from block_detection import BlockAssessment, BlockDetector, BlockDetectorConfig
 from config import config
-from event_store import CATEGORY_BLOCK, CATEGORY_SPIKE, CATEGORY_UNDEFINED, EventStore
+from event_store import (
+    CATEGORY_ACE,
+    CATEGORY_BALL_ON_NET,
+    CATEGORY_BLOCK,
+    CATEGORY_ERROR,
+    CATEGORY_FREEBALL,
+    CATEGORY_SPIKE,
+    CATEGORY_UNDEFINED,
+    EventStore,
+)
 from scoreboard_template_reader import ScoreboardReader
 
 
@@ -793,10 +802,23 @@ class AnalyticsEngine:
         self.last_block_assessment = BlockAssessment(reasons=["initialized"])
 
     def _event_category(self, ptype: str, resultado: str, inconclusivo: bool) -> str:
-        if not inconclusivo and (ptype == "POINT_BY_BLOCK" or resultado == "BLOCK"):
+        # Mapeia (ptype, resultado) → categoria do event_store. ACE, ERROR,
+        # FREEBALL e BALL_ON_NET são categorias de primeira classe, deixando
+        # `undefined` apenas para casos genuinamente inconclusivos.
+        ptype_u = str(ptype or "").upper()
+        resultado_u = str(resultado or "").upper()
+        if ptype_u == "POINT_BY_BLOCK" or resultado_u == "BLOCK":
             return CATEGORY_BLOCK
-        if not inconclusivo and (ptype == "POINT_BY_SPIKE" or resultado == "SPIKE"):
+        if ptype_u == "POINT_BY_SPIKE" or resultado_u == "SPIKE":
             return CATEGORY_SPIKE
+        if ptype_u == "ACE" or resultado_u == "ACE":
+            return CATEGORY_ACE
+        if ptype_u in ("OPPONENT_ERROR", "TEAM_ERROR") or resultado_u in ("ERROR", "TEAM_ERROR"):
+            return CATEGORY_ERROR
+        if ptype_u == "FREEBALL" or resultado_u == "FREEBALL":
+            return CATEGORY_FREEBALL
+        if ptype_u in ("BOLA_NA_REDE", "BALL_ON_NET") or resultado_u == "BALL_ON_NET":
+            return CATEGORY_BALL_ON_NET
         return CATEGORY_UNDEFINED
 
     def _event_confidence(self, category: str, resultado: str, inconclusivo: bool, speed_peak: float) -> float:
@@ -808,7 +830,13 @@ class AnalyticsEngine:
         if category == CATEGORY_SPIKE:
             speed_bonus = min(max(float(speed_peak), 0.0) / max(self.spike_speed_threshold_px * 2.0, 1.0), 0.35)
             return float(min(0.60 + speed_bonus, 0.95))
-        if resultado == "BALL_ON_NET":
+        if category == CATEGORY_ACE:
+            return 0.70
+        if category == CATEGORY_ERROR:
+            return 0.65
+        if category == CATEGORY_FREEBALL:
+            return 0.55
+        if category == CATEGORY_BALL_ON_NET:
             return 0.55
         if inconclusivo:
             return 0.25
@@ -819,7 +847,13 @@ class AnalyticsEngine:
             return self.last_block_assessment.reason_text()
         if category == CATEGORY_SPIKE:
             return "trajectory_spike_classification"
-        if resultado == "BALL_ON_NET":
+        if category == CATEGORY_ACE:
+            return "service_ace"
+        if category == CATEGORY_ERROR:
+            return "attack_error_or_team_error"
+        if category == CATEGORY_FREEBALL:
+            return "freeball_returned"
+        if category == CATEGORY_BALL_ON_NET:
             return "ball_on_net_or_no_clean_reversal"
         if inconclusivo:
             return "trajectory_inconclusive"

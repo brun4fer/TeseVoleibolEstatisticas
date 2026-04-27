@@ -17,7 +17,21 @@ import cv2
 
 CATEGORY_SPIKE = "spike"
 CATEGORY_BLOCK = "block"
+CATEGORY_ACE = "ace"
+CATEGORY_ERROR = "error"            # ponto perdido por erro (atacante manda fora, na rede, etc.)
+CATEGORY_FREEBALL = "freeball"
+CATEGORY_BALL_ON_NET = "ball_on_net"
 CATEGORY_UNDEFINED = "undefined"
+
+ALL_CATEGORIES = (
+    CATEGORY_SPIKE,
+    CATEGORY_BLOCK,
+    CATEGORY_ACE,
+    CATEGORY_ERROR,
+    CATEGORY_FREEBALL,
+    CATEGORY_BALL_ON_NET,
+    CATEGORY_UNDEFINED,
+)
 
 
 @dataclass
@@ -141,16 +155,10 @@ class EventStore:
         return dict(events[-1])
 
     def category_counts(self) -> Dict[str, int]:
-        counts = {
-            CATEGORY_SPIKE: 0,
-            CATEGORY_BLOCK: 0,
-            CATEGORY_UNDEFINED: 0,
-        }
+        counts = {cat: 0 for cat in ALL_CATEGORIES}
         for event in self.data.get("events", []):
             category = str(event.get("category", CATEGORY_UNDEFINED))
-            if category not in counts:
-                counts[category] = 0
-            counts[category] += 1
+            counts[category] = counts.get(category, 0) + 1
         return counts
 
     @classmethod

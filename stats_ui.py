@@ -8,7 +8,16 @@ import tkinter as tk
 from tkinter import ttk
 
 from config import config
-from event_store import CATEGORY_BLOCK, CATEGORY_SPIKE, CATEGORY_UNDEFINED, EventStore
+from event_store import (
+    CATEGORY_ACE,
+    CATEGORY_BALL_ON_NET,
+    CATEGORY_BLOCK,
+    CATEGORY_ERROR,
+    CATEGORY_FREEBALL,
+    CATEGORY_SPIKE,
+    CATEGORY_UNDEFINED,
+    EventStore,
+)
 
 
 APP_BG = "#F5F7FA"
@@ -36,9 +45,21 @@ FONT_EMOJI = "Segoe UI Emoji"
 META = {
     CATEGORY_SPIKE: {"label": "Spikes", "singular": "Spike", "icon": "\U0001F525", "badge_bg": "#FFEDD5", "badge_fg": "#C2410C"},
     CATEGORY_BLOCK: {"label": "Blocos", "singular": "Bloco", "icon": "\U0001F9F1", "badge_bg": "#DBEAFE", "badge_fg": "#1D4ED8"},
+    CATEGORY_ACE: {"label": "Aces", "singular": "Ace", "icon": "\U0001F3AF", "badge_bg": "#FEF3C7", "badge_fg": "#92400E"},
+    CATEGORY_ERROR: {"label": "Erros", "singular": "Erro", "icon": "\u26a0", "badge_bg": "#FEE2E2", "badge_fg": "#B91C1C"},
+    CATEGORY_FREEBALL: {"label": "Freeballs", "singular": "Freeball", "icon": "\U0001F4A8", "badge_bg": "#D1FAE5", "badge_fg": "#047857"},
+    CATEGORY_BALL_ON_NET: {"label": "Bola na Rede", "singular": "Bola na Rede", "icon": "\U0001F3D0", "badge_bg": "#E0E7FF", "badge_fg": "#3730A3"},
     CATEGORY_UNDEFINED: {"label": "Indefinidos", "singular": "Indefinido", "icon": "\u2753", "badge_bg": "#EDE9FE", "badge_fg": "#6D28D9"},
 }
-ORDER = (CATEGORY_SPIKE, CATEGORY_BLOCK, CATEGORY_UNDEFINED)
+ORDER = (
+    CATEGORY_SPIKE,
+    CATEGORY_BLOCK,
+    CATEGORY_ACE,
+    CATEGORY_ERROR,
+    CATEGORY_FREEBALL,
+    CATEGORY_BALL_ON_NET,
+    CATEGORY_UNDEFINED,
+)
 
 
 class StatsUI(tk.Tk):
@@ -227,7 +248,7 @@ class StatsUI(tk.Tk):
         events = snapshot.get("events", [])
         self.status_var.set(f"{len(events)} eventos")
         self.updated_var.set(f"Atualizado: {snapshot.get('updated_at') or '--'}")
-        counts = {CATEGORY_SPIKE: 0, CATEGORY_BLOCK: 0, CATEGORY_UNDEFINED: 0}
+        counts = {cat: 0 for cat in ORDER}
         for event in events:
             counts[str(event.get("category", CATEGORY_UNDEFINED))] = counts.get(str(event.get("category", CATEGORY_UNDEFINED)), 0) + 1
         for category in ORDER:
