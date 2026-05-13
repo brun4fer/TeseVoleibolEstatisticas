@@ -20,8 +20,9 @@ class Config:
     event_store_file: Path = Path("outputs/volleyball_events.json")
 
     # Time window (absolute timestamps in the video)
-    # start_ts: str = "00:37:12"
-    start_ts: str = "00:27:21"
+    start_ts: str = "00:37:12"
+    # start_ts: str = "00:27:21"
+    # start_ts: str = "00:29:53"
     end_ts: str = "00:46:17"
 
     # Models
@@ -88,6 +89,7 @@ class Config:
     scoreboard_initial_confirm_reads: int = 2
     scoreboard_change_confirm_reads: int = 2
     scoreboard_valid_set_values: Tuple[int, ...] = (0, 1, 2, 3, 4, 5)
+    scoreboard_max_total_completed_sets: int = 4
     scoreboard_max_points_value: int = 60
 
     # Kalman noise params

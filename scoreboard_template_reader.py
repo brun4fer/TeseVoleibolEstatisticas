@@ -324,6 +324,116 @@ def _remove_small_components(binary: np.ndarray) -> np.ndarray:
     return cleaned if np.count_nonzero(cleaned) > 0 else binary
 
 
+def extract_digit_components(
+    binary: np.ndarray,
+    max_digits: int,
+) -> list[np.ndarray]:
+    component_count, labels, stats, _centroids = cv2.connectedComponentsWithStats(binary, 8)
+    if component_count <= 1:
+        return []
+
+    min_area = max(6, int(binary.size * 0.015))
+    min_height = max(6, int(binary.shape[0] * 0.40))
+    components: list[tuple[int, int, np.ndarray]] = []
+
+    for label in range(1, component_count):
+        x, y, box_w, box_h, area = [int(v) for v in stats[label]]
+        if area < min_area or box_h < min_height or box_w <= 0:
+            continue
+
+        pad = 1
+        x0 = max(0, x - pad)
+        y0 = max(0, y - pad)
+        x1 = min(binary.shape[1], x + box_w + pad)
+        y1 = min(binary.shape[0], y + box_h + pad)
+        component = binary[y0:y1, x0:x1]
+        if component.size == 0 or np.count_nonzero(component) == 0:
+            continue
+        components.append((x0, area, component))
+
+    if not components:
+        return []
+
+    if max_digits > 0 and len(components) > max_digits:
+        components = sorted(components, key=lambda item: item[1], reverse=True)[:max_digits]
+
+    components = sorted(components, key=lambda item: item[0])
+    return [component for _x, _area, component in components]
+
+
+def classify_digit_component(
+    binary: np.ndarray,
+    templates: Dict[int, np.ndarray],
+    allowed_digits: Tuple[int, ...] | None = None,
+) -> tuple[int, float]:
+    normalized = normalize_binary(binary, TARGET_SIZE)
+    if float(np.std(normalized)) < 1e-6:
+        return 0, -1.0
+
+    digit_pool = allowed_digits if allowed_digits is not None else tuple(sorted(templates.keys()))
+    best_digit = 0
+    best_score = float("-inf")
+
+    normalized_mask = normalized > 0
+    normalized_size = float(max(normalized.size, 1))
+    for digit in digit_pool:
+        template = templates[digit]
+        corr = float(cv2.matchTemplate(normalized, template, cv2.TM_CCOEFF_NORMED)[0, 0])
+
+        template_mask = template > 0
+        union = int(np.count_nonzero(normalized_mask | template_mask))
+        inter = int(np.count_nonzero(normalized_mask & template_mask))
+        iou = float(inter) / float(union) if union > 0 else 0.0
+
+        xor_similarity = 1.0 - (
+            float(np.count_nonzero(cv2.bitwise_xor(normalized, template))) / normalized_size
+        )
+
+        score = (0.60 * corr) + (0.25 * iou) + (0.15 * xor_similarity)
+        if score > best_score:
+            best_score = score
+            best_digit = int(digit)
+
+    return best_digit, float(best_score)
+
+
+def match_digits_by_components(
+    binary: np.ndarray,
+    templates: Dict[int, np.ndarray],
+    allowed_digits: Tuple[int, ...] | None = None,
+    max_digits: int = 2,
+) -> tuple[int, float] | None:
+    components = extract_digit_components(binary, max_digits=max_digits)
+    if not components:
+        return None
+    if max_digits > 0 and len(components) > max_digits:
+        return None
+    if max_digits > 1 and len(components) != 1:
+        return None
+    if max_digits > 1 and len(components) == 1:
+        single_component_width = int(components[0].shape[1])
+        if single_component_width > int(round(binary.shape[1] * 0.55)):
+            return None
+
+    digits: list[str] = []
+    scores: list[float] = []
+    for component in components:
+        digit, score = classify_digit_component(
+            component,
+            templates,
+            allowed_digits=allowed_digits,
+        )
+        if score < 0.0:
+            return None
+        digits.append(str(digit))
+        scores.append(float(score))
+
+    if not digits:
+        return None
+
+    return int("".join(digits)), float(np.mean(scores))
+
+
 def normalize_strip_for_matching(
     binary: np.ndarray,
     target_height: int,
@@ -559,13 +669,23 @@ def read_scoreboard_roi(
             target_height=TARGET_SIZE[1],
             min_width=min_width,
         )
-        digit, score = match_digits(
+        component_match = match_digits_by_components(
+            processed_binary,
+            templates,
+            allowed_digits=ALLOWED_DIGITS_BY_REGION.get(spec.name),
+            max_digits=max_digits,
+        )
+        strip_digit, strip_score = match_digits(
             processed,
             templates,
             allowed_digits=ALLOWED_DIGITS_BY_REGION.get(spec.name),
             match_threshold=float(MATCH_THRESHOLD_BY_REGION.get(spec.name, DEFAULT_MATCH_THRESHOLD)),
             max_digits=max_digits,
         )
+        if component_match is not None:
+            digit, score = component_match
+        else:
+            digit, score = strip_digit, strip_score
         results[spec.name] = digit
         debug_info[spec.name] = (cropped_digit, processed, score)
         total_score += score

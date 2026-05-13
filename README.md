@@ -1,482 +1,331 @@
-# Volleyball Ball Tracking System
+# Volleyball Match Analytics for Thesis
 
-Computer vision project for automatic volleyball analysis from video, developed in the context of an academic thesis on sports analytics.
+Computer vision project for volleyball analysis from match video, developed in the context of an academic thesis on sports analytics.
 
-## 2. Description / Overview
-This project focuses on detecting the volleyball, estimating its trajectory over time, and extracting motion-related information from match footage. The current implementation combines object detection with temporal consistency rules and auxiliary motion cues to make ball tracking more stable in difficult broadcast-style scenes.
+This repository is no longer just a ball-tracking experiment. In its current state, it combines:
 
-The core problem is not simply "find a white circle in the frame". In real matches, the system must deal with:
+- ball detection and temporal tracking
+- court calibration and homography
+- scoreboard OCR with template matching
+- rally segmentation and event classification
+- event persistence to JSON with preview frames
+- a small desktop dashboard for reviewing detected events
 
-- small ball size relative to the full frame
-- motion blur during fast attacks and serves
-- occlusions by players and the net
-- visually confusing static structures such as walls, banners, and court markings
-- low contrast when the ball overlaps the wooden floor
+## Current status
 
-This repository was created to support automatic volleyball analysis, including ball tracking, trajectory visualization, point analysis, and the broader goal of automating match statistics from video.
+The project already has a working end-to-end prototype for offline volleyball analysis.
 
-At the moment, the project contains:
+Implemented today:
 
-- a focused experimental script for ball detection and trajectory validation: [`test_ball_detection.py`](test_ball_detection.py)
-- a broader end-to-end match analysis pipeline: [`main.py`](main.py), [`tracker.py`](tracker.py), [`analytics.py`](analytics.py)
-- training, calibration, OCR, and dataset utility scripts
+- full video processing pipeline through [`main.py`](main.py)
+- YOLO-based player and ball detection
+- temporal ball selection and recovery logic in [`ball_tracking_core.py`](ball_tracking_core.py)
+- Kalman-assisted ball smoothing and short-gap interpolation in [`tracker.py`](tracker.py)
+- manual court calibration and court-plane projection in [`calibration.py`](calibration.py)
+- scoreboard OCR based on digit templates in [`scoreboard_template_reader.py`](scoreboard_template_reader.py)
+- scoreboard sanity checks and stable voting in [`analytics.py`](analytics.py)
+- rally closing and point-type classification such as spike, block, ace, error, freeball, and ball-on-net
+- persistent event storage in [`event_store.py`](event_store.py)
+- event review tools in [`stats_ui.py`](stats_ui.py) and [`stats_debug.py`](stats_debug.py)
 
-## 3. Demonstration
-This repository currently does not ship with embedded GIFs or screenshots, but the intended demonstration section should show:
+Still not finished:
 
-- the original frame with the detected ball bounding box
-- the estimated trajectory drawn over time
-- the computed ball speed
-- difficult cases such as serves, spikes, wall-like false positives, and ball-over-floor scenarios
+- fully automatic official match statistics extraction
+- automatic calibration and automatic scoreboard ROI discovery
+- quantitative benchmark evaluation
+- packaging and reproducible dependency management
 
-Recommended demo assets for a future portfolio version:
+## What the pipeline does
 
-- short GIF of `test_ball_detection.py` with trajectory overlay
-- comparison clip showing raw YOLO detections vs. temporally filtered final detections
-- screenshot of the full analytics pipeline with scoreboard and rally classification
+At a high level, the main workflow is:
 
-## 4. Features
-- Ball detection from volleyball video using YOLO.
-- Candidate validation using bounding box size and plausible image regions.
-- Temporal continuity filtering using recent ball positions.
-- Simple motion prediction using the two latest accepted centers.
-- Auxiliary foreground analysis via background subtraction.
-- Trajectory drawing with protection against unrealistic long segments.
-- Approximate ball speed estimation in km/h.
-- Real-time visualization of detections, speed, and trajectory.
-- Broader rally analytics pipeline with scoreboard reading and point classification.
+1. Open a selected video segment defined in [`config.py`](config.py).
+2. Calibrate the court with manual clicks and estimate the homography.
+3. Select the scoreboard ROI.
+4. Detect players and ball candidates with YOLO.
+5. Track the ball through temporal scoring, gating, recovery logic, and Kalman support.
+6. Project ball motion into calibrated court geometry.
+7. Read the scoreboard with template-based OCR and stabilize the reading over time.
+8. Use rally logic plus scoreboard changes to confirm point endings.
+9. Classify the rally outcome and save structured events.
+10. Export CSV/JSON outputs and optional preview images.
 
-## 5. System Architecture
-The current ball detection experiment follows this pipeline:
+## Main components
 
-1. Read frames from a selected time window of the input video.
-2. Resize the frame to a working resolution suitable for YOLO inference.
-3. Run YOLO on the current frame to detect candidate ball bounding boxes.
-4. Parse all valid ball candidates rather than immediately trusting the highest-confidence box.
-5. Apply geometric plausibility filters:
-   - valid class
-   - valid bounding box size
-   - valid image region
-6. Build a foreground mask with background subtraction.
-7. Measure local motion evidence around each candidate:
-   - `fg_active_pixels`
-   - `fg_active_ratio`
-8. Estimate trajectory continuity using:
-   - `previous_center`
-   - `older_center`
-   - predicted next center
-9. Reject physically implausible candidates using temporal hard gates:
-   - maximum step distance
-   - maximum prediction error
-10. Score the remaining candidates using a combined cost based on:
-   - temporal coherence
-   - YOLO confidence
-   - foreground support
-11. Accept the best candidate and update:
-   - speed history
-   - trajectory deque
-   - temporal state
-12. Render the final visualization and debug output.
-
-In the broader repository, the full analysis system extends this with:
-
-1. court calibration and homography
-2. player tracking
-3. OCR-based scoreboard reading
-4. rally segmentation
-5. event classification such as spike, block, ace, and error
-
-## 6. Tracking Logic
-This is the most important part of the current ball selection strategy.
-
-### `previous_center`
-`previous_center` stores the last accepted ball center. It is the main temporal anchor for frame-to-frame continuity.
-
-It is used to:
-
-- measure displacement between consecutive accepted positions
-- estimate instantaneous speed
-- reject candidate jumps that are too large
-- decide whether the current detection is consistent with the recent track
-
-### `older_center`
-`older_center` stores the penultimate accepted center. Together with `previous_center`, it provides a short motion history.
-
-This lets the system estimate a simple velocity vector:
-
-- `vx = previous_center.x - older_center.x`
-- `vy = previous_center.y - older_center.y`
-
-### Motion prediction
-The project uses a lightweight prediction rule:
-
-```text
-predicted_center = previous_center + (previous_center - older_center)
-```
-
-This assumes short-term constant velocity. It is intentionally simple:
-
-- easy to inspect
-- easy to debug
-- good enough to reject obviously incoherent detections
-- lightweight for real-time experimentation
-
-### Distance validation
-Candidate detections are checked against temporal plausibility before final scoring:
-
-- `MAX_STEP_PIXELS`
-  Limits the distance between the last accepted center and the current candidate.
-
-- `MAX_PREDICTION_ERROR_PIXELS`
-  Limits how far a candidate can be from the predicted next position.
-
-If a candidate violates these hard gates, it is rejected before scoring.
-
-### Combined scoring
-Once candidates pass the hard gates, the system computes a final score that combines:
-
-- distance to the last accepted center
-- prediction error relative to the estimated next center
-- YOLO confidence
-- foreground support measured in a local motion patch
-
-This is important because no single signal is enough:
-
-- YOLO confidence alone may prefer a static false positive
-- foreground alone is noisy on the wooden court
-- temporal continuity alone can fail after occlusion
-
-The selected candidate is the one with the best combined score.
-
-### Missed frame handling
-The system does not immediately destroy temporal state after one failed frame.
-
-- `missed_frames` counts consecutive frames with no valid accepted candidate
-- while the count stays below `MAX_MISSED_FRAMES`, the temporal state is preserved
-- if the count exceeds the threshold, the system resets:
-  - `previous_center`
-  - `older_center`
-  - `speed_history_kmh`
-  - `trajectory`
-
-This allows short interruptions without fully losing the track.
-
-### Outlier rejection
-Even after temporal gating, accepted detections still go through speed sanity checks.
-
-- `MAX_SPEED_KMH` rejects implausible jumps
-- low-motion filters can suppress detections that remain almost stationary for too long
-
-### Trajectory continuity
-The visual trajectory is stored in a `deque` and updated only for accepted detections.
-
-To avoid drawing misleading lines:
-
-- the trajectory is cleared when the track is truly lost
-- the trajectory is cleared after persistent invalid states
-- `draw_trajectory()` skips unrealistic long segments
-
-This prevents the overlay from connecting unrelated points across time.
-
-## 7. Implemented Filters
-The system uses multiple filters that complement each other.
-
-### YOLO Detection
-YOLO is the main detector and the first source of ball candidates.
-
-Signals used:
-
-- class label
-- confidence score
-- bounding box coordinates
-
-Role:
-
-- propose candidate ball locations
-- provide the confidence prior used in final ranking
-
-Limitations:
-
-- can still fire on static circular or bright regions
-- may confuse the ball with background details under challenging lighting
-
-### Bounding Box and Position Validation
-Before a candidate enters the tracking logic, it must satisfy:
-
-- minimum width
-- minimum height
-- minimum area
-- plausible x/y position inside the frame
-
-This removes obviously invalid boxes and many detections near borders or implausible areas.
-
-### Motion Gating
-Motion gating is the main temporal filter.
-
-It uses:
-
-- `previous_center`
-- `older_center`
-- `predict_next_center()`
-
-Hard checks:
-
-- maximum step distance
-- maximum prediction error
-
-Soft ranking:
-
-- lower distance to the recent trajectory is better
-- lower prediction error is better
-- higher confidence helps the candidate
-
-This prevents the system from switching to a false positive that is spatially inconsistent with the ongoing ball path.
-
-### Background Subtraction
-Background subtraction is an auxiliary signal, not the primary detector.
-
-The current implementation uses OpenCV MOG2 to build a foreground mask and then measures motion around each candidate center.
-
-Per candidate, the system stores:
-
-- `fg_active_pixels`
-- `fg_active_ratio`
-- `low_foreground`
-
-Foreground is now used as a scoring cue rather than a hard binary rejection in most cases.
-
-Why this matters:
-
-- on white or high-contrast backgrounds, the ball often yields cleaner foreground support
-- on the wooden court, foreground is noisier because of players, shadows, and scene dynamics
-- treating foreground as a soft signal makes the system more tolerant in realistic gameplay
-
-Limitations:
-
-- background subtraction is sensitive to camera noise and overall scene motion
-- players moving close to the ball region can inflate local foreground support
-- the wooden court remains a difficult setting
-
-### Trajectory Filtering
-Trajectory filtering focuses on visual consistency.
-
-Implemented safeguards:
-
-- trajectory reset after prolonged track loss
-- trajectory reset after invalid state accumulation
-- no insertion of rejected detections into the trajectory
-- segment-level skip for unrealistically long visual connections
-
-This improves both interpretability and debugging.
-
-## 8. Code Structure
-The repository contains both the focused ball detection experiment and the broader match analytics pipeline.
-
-### Main files
-- [`test_ball_detection.py`](test_ball_detection.py)
-  Standalone experimental script for ball detection, temporal candidate selection, speed estimation, background subtraction scoring, and trajectory visualization.
+### Core pipeline
 
 - [`main.py`](main.py)
-  Entry point for the broader volleyball analytics workflow.
+  Entry point for the full analysis pipeline.
 
 - [`tracker.py`](tracker.py)
-  Full tracker used by the main pipeline. Includes player detection, ball tracking support, court logic, and geometric net-event logic.
+  Runtime tracker for players and ball, with geometry-aware logic near the net.
+
+- [`ball_tracking_core.py`](ball_tracking_core.py)
+  Shared ball decision engine: candidate parsing, temporal scoring, foreground support, speed checks, and trajectory maintenance.
 
 - [`analytics.py`](analytics.py)
-  Rally and point analysis engine. Uses motion heuristics, OCR consistency, and event rules to classify outcomes.
+  Rally manager, scoreboard stabilization, OCR validation, event classification, and statistics export.
+
+- [`volleyball_rules.py`](volleyball_rules.py)
+  Incremental game-intelligence layer used to reason about ball continuity, likely possession, net crossing, and rally lifecycle hints.
+
+- [`block_detection.py`](block_detection.py)
+  Trajectory-driven block detector on top of calibrated court geometry.
+
+### Calibration and OCR
 
 - [`calibration.py`](calibration.py)
-  Court calibration, homography estimation, and pixel-to-court projection utilities.
-
-- [`config.py`](config.py)
-  Central configuration for paths, thresholds, and execution settings.
+  Manual court calibration and storage of homography, net line, and scoreboard ROI metadata.
 
 - [`scoreboard_template_reader.py`](scoreboard_template_reader.py)
-  Template-based scoreboard reading used by the analytics pipeline.
+  Template-based OCR for scoreboard digits using preprocessing, component matching, and fallback strip matching.
+
+- [`digit_templates/`](digit_templates)
+  Digit templates used by the scoreboard reader.
+
+### Event review and outputs
+
+- [`event_store.py`](event_store.py)
+  Persistent JSON event store with preview frame export.
+
+- [`stats_ui.py`](stats_ui.py)
+  Tkinter dashboard for browsing saved events.
+
+- [`stats_debug.py`](stats_debug.py)
+  CLI summary for auditing event categories, reasons, and recent detections.
+
+### Training and dataset utilities
 
 - [`train_vball.py`](train_vball.py)
-  Utility to fine-tune a YOLO model specifically for volleyball ball detection.
+  Helper script for YOLO fine-tuning on volleyball ball data.
 
-### Main functions in `test_ball_detection.py`
-- `get_ball_candidates()`
-  Parses YOLO outputs into candidate detections.
+- [`extract_frames.py`](extract_frames.py)
+- [`ingest_dataset.py`](ingest_dataset.py)
+- [`split_dataset.py`](split_dataset.py)
+- [`rename_dataset.py`](rename_dataset.py)
+- [`check_dataset.py`](check_dataset.py)
 
-- `predict_next_center()`
-  Predicts the next plausible ball position using the last two accepted centers.
+These scripts support dataset preparation and maintenance, but the main thesis workflow is currently the analysis pipeline in [`main.py`](main.py).
 
-- `score_ball_candidate()`
-  Combines temporal distance, prediction error, YOLO confidence, and foreground support into a single selection score.
+## Repository layout
 
-- `select_ball_candidate()`
-  Applies temporal hard gates and chooses the best candidate.
+```text
+.
+|-- analytics.py
+|-- ball_tracking_core.py
+|-- block_detection.py
+|-- calibration.py
+|-- config.py
+|-- court_geometry.py
+|-- event_store.py
+|-- main.py
+|-- overlay_renderer.py
+|-- scoreboard_template_reader.py
+|-- stats_debug.py
+|-- stats_ui.py
+|-- tracker.py
+|-- volleyball_rules.py
+|-- calibration/
+|-- dataset/
+|-- digit_templates/
+|-- outputs/
+|-- runs/
+```
 
-- `calculate_speed()`
-  Converts frame-to-frame displacement into estimated speed.
+## Requirements
 
-- `draw_trajectory()`
-  Renders the accepted ball path while skipping unrealistic long segments.
+There is currently no `requirements.txt`, so setup is manual.
 
-- `build_foreground_mask()`
-  Creates a binary foreground mask using background subtraction.
+Recommended environment:
 
-- `foreground_score_at_center()`
-  Measures local motion evidence around a candidate center.
+- Python 3.10 or newer
+- Windows is the environment currently assumed by the repository layout
+- CUDA-enabled PyTorch if GPU inference is desired
 
-### Flow of `main()`
-At a high level, `main()` in `test_ball_detection.py`:
+Main Python packages:
 
-1. loads the model and video
-2. initializes temporal state
-3. builds the foreground mask for each frame
-4. gets YOLO candidates
-5. selects the best candidate with temporal logic
-6. computes speed if the detection is accepted
-7. updates trajectory and debug state
-8. renders overlays and logs
+- `torch`
+- `ultralytics`
+- `opencv-python`
+- `numpy`
+- `pandas`
+- `pyyaml`
 
-## 9. Installation
-This repository currently does not include a `requirements.txt`, so the simplest setup is to install the main dependencies manually.
+Optional notes:
+
+- [`stats_ui.py`](stats_ui.py) uses Tkinter. On standard Windows Python installs this is usually already available.
+- Some helper scripts may depend on your local video and dataset layout.
+
+Example setup:
 
 ```bash
 git clone https://github.com/brun4fer/TeseVoleibolEstatisticas.git
 cd TeseVoleibolEstatisticas
 python -m venv .venv
 .venv\Scripts\activate
-pip install ultralytics opencv-python numpy torch pandas pyyaml static-ffmpeg
+pip install torch ultralytics opencv-python numpy pandas pyyaml
 ```
 
-Optional dependencies:
-
-- `detectron2`
-  Only needed for the experimental Detectron pipeline under [`experiments/detectron_pipeline`](experiments/detectron_pipeline).
-
-Recommended environment notes:
-
-- Python 3.10 or newer
-- CUDA-enabled PyTorch if GPU inference is desired
-- Windows works well with the current repository layout
-
-## 10. How to Run
-### Ball detection experiment
-Run the standalone ball detection and trajectory visualization script:
+If you want to verify GPU visibility:
 
 ```bash
-python test_ball_detection.py
+python check_gpu.py
 ```
 
-Before running it, review these constants in [`test_ball_detection.py`](test_ball_detection.py):
+## Configuration
 
-- `VIDEO_PATH`
-- `START_TIME`
-- `END_TIME`
-- `MODEL_PATH`
+Before running the full pipeline, review [`config.py`](config.py).
 
-These define:
+The most important fields are:
 
-- which video is processed
-- which segment of the video is analyzed
-- which YOLO weights are used
+- `videos_dir`
+- `video_file`
+- `start_ts`
+- `end_ts`
+- `ball_yolo_model`
+- `score_roi`
+- `ocr_every_n_frames`
+- debug and visualization flags such as `HEADLESS_MODE`, `SHOW_STATS_PANEL`, and `SHOW_BLOCK_DEBUG`
+
+Important practical note:
+
+- the current config uses Windows-style local paths
+- the pipeline is meant for offline analysis of a chosen video segment, not batch processing of a dataset folder
+
+## How to run
 
 ### Full analytics pipeline
-To run the broader volleyball analysis system:
 
 ```bash
 python main.py
 ```
 
-Before running it, review [`config.py`](config.py):
+Current startup behavior:
 
-- input video path
-- start and end timestamps
-- calibration paths
-- execution mode and thresholds
+1. The program opens the selected video segment.
+2. It asks for manual court calibration clicks.
+3. It asks for manual scoreboard ROI selection.
+4. It then processes the configured time window frame by frame.
 
-### Training a ball-specific model
-To fine-tune YOLO for volleyball ball detection:
+This is the real current behavior of the repository. Calibration and scoreboard selection are not yet fully automatic.
+
+### Evaluation mode
 
 ```bash
-python train_vball.py --data data.yaml --batch 16
+python main.py --eval
 ```
 
-## 11. Important Parameters
-The most influential parameters are split between the experimental ball script and the main configuration.
+`--eval` runs the processing stage without the live overlay, but the current version still requires the startup calibration and ROI selection steps before frame processing begins.
 
-### Ball detection experiment
-| Parameter | Meaning | Practical impact |
-| --- | --- | --- |
-| `CONF_THRESHOLD` | Minimum YOLO confidence for raw detections | Higher values reduce noise but can miss small balls |
-| `MAX_SPEED_KMH` | Maximum plausible speed after acceptance | Rejects extreme jumps and spurious switches |
-| `MAX_STEP_PIXELS` | Maximum step from last accepted center | Strong temporal continuity gate |
-| `MAX_PREDICTION_ERROR_PIXELS` | Maximum error relative to predicted center | Controls tolerance to trajectory deviation |
-| `MAX_MISSED_FRAMES` | Number of misses before full state reset | Higher values preserve continuity longer |
-| `MIN_MOVEMENT_PIXELS` | Threshold for very small motion | Helps detect stationary false positives |
-| `MAX_STATIONARY_FRAMES` | Consecutive near-static frames before suppression | Higher values are more tolerant to slow play |
-| `DISTANCE_WEIGHT` | Weight of step distance in final score | Larger values prioritize continuity more strongly |
-| `PREDICTION_WEIGHT` | Weight of prediction error in final score | Larger values prioritize short-term motion prediction |
-| `CONFIDENCE_WEIGHT` | Contribution of YOLO confidence | Larger values trust the detector more |
-| `FOREGROUND_WEIGHT` | Contribution of foreground support | Larger values favor moving candidates |
-| `LOW_FOREGROUND_PENALTY` | Penalty applied to weak foreground candidates | Useful to discourage static false positives without hard rejection |
-| `FOREGROUND_PATCH_RADIUS` | ROI radius around candidate center | Controls local motion measurement size |
-| `SHOW_FOREGROUND_DEBUG` | Draw foreground diagnostics near the bbox | Useful for tuning |
-| `SHOW_FOREGROUND_MASK` | Show the MOG2 foreground mask window | Useful for diagnosing motion quality |
+### Scoreboard OCR tool
 
-### Full pipeline configuration
-| Parameter | Meaning | File |
-| --- | --- | --- |
-| `ball_conf_high` / `ball_conf_low` | Ball acceptance thresholds | [`config.py`](config.py) |
-| `kalman_gate_px` | Kalman gating threshold in the full tracker | [`config.py`](config.py) |
-| `ball_min_area_px` / `ball_max_area_px` | Minimum and maximum ball box area | [`config.py`](config.py) |
-| `court_margin_m` | Margin for court geometry acceptance | [`config.py`](config.py) |
-| `net_band_height_px` | Net tolerance used in event logic | [`config.py`](config.py) |
-| `spike_speed_threshold_px` | Spike vs. freeball heuristic threshold | [`config.py`](config.py) |
+To test the scoreboard reader in isolation:
 
-## 12. Current Limitations
-This project is functional, but it still faces several realistic limitations.
+```bash
+python scoreboard_template_reader.py --video "C:\path\to\video.mp4"
+```
 
-- The ball remains difficult to distinguish when it overlaps the wooden court.
-- Background subtraction is informative but noisy in scenes with many moving players.
-- Performance depends heavily on the quality of the YOLO weights and the diversity of the training data.
-- Strong occlusions by players or the net can still break continuity.
-- Speed estimation is approximate because it depends on pixel displacement and a scale factor, not a full 3D physical reconstruction.
-- Broadcast camera changes, zoom, or motion can reduce foreground stability.
-- The temporal model is intentionally lightweight, so it is less robust than a dedicated probabilistic tracker.
+Useful optional arguments:
 
-## 13. Future Improvements
-- Expand and rebalance the volleyball ball dataset with more difficult floor-background cases.
-- Train a more robust dedicated small-object detector.
-- Add automatic calibration-aware filtering based on the actual court polygon.
-- Replace the simple temporal predictor with a Kalman filter inside the standalone script.
-- Integrate a more robust multi-object or re-identification tracker when needed.
-- Improve ball segmentation or appearance modeling for hard ball-over-floor cases.
-- Add benchmark evaluation metrics such as precision, recall, ID consistency, and tracking stability.
-- Export richer analytics and trajectory summaries for coaches and performance staff.
+- `--start`
+- `--end`
+- `--frame-step`
+- `--templates-dir`
+- `--set-ratio`
+- `--block-size`
+- `--threshold-c`
 
-## 14. Technologies Used
-- Python
-- OpenCV
-- NumPy
-- PyTorch
-- Ultralytics YOLO
-- pandas
-- YAML-based dataset configuration
+### Event dashboard
 
-## 15. Academic Context
-This repository is part of an academic effort focused on automatic performance analysis in volleyball.
+```bash
+python stats_ui.py
+```
 
-The broader objective is to support thesis-level research on:
+This opens the Tkinter dashboard for browsing the saved events from `outputs/volleyball_events.json`.
 
-- ball tracking in real match footage
-- automatic rally understanding
-- event classification
-- scoreboard-based validation
-- video-driven statistical analysis for sports performance
+### Event debug summary
 
-In that sense, this project is both:
+```bash
+python stats_debug.py
+```
 
-- a technical computer vision prototype
-- a research tool for volleyball analytics
+Or with an explicit path:
 
-## 16. Author
-Bruno  
-Email: bigbf1130@gmail.com  
+```bash
+python stats_debug.py outputs/volleyball_events.json
+```
+
+### Ball-tracking experiment
+
+```bash
+python test_ball_detection.py
+```
+
+This script is still useful for focused debugging of ball selection and trajectory behavior, but it is no longer the only important part of the repository.
+
+### Training helper
+
+```bash
+python train_vball.py --data data.yaml
+```
+
+This script is a helper, not a polished training CLI. Review the file before long training runs because some training parameters are still hardcoded inside the script.
+
+## Generated files
+
+The main pipeline currently writes:
+
+- `calibration/field_params.json`
+  Saved homography, net line, and scoreboard ROI metadata.
+
+- `outputs/tese_volleyball_stats.csv`
+  CSV export of finished rallies.
+
+- `outputs/volleyball_events.json`
+  Structured event log.
+
+- `outputs/event_previews/`
+  Preview images associated with recorded events.
+
+- `outputs/stats_summary.json`
+  Summary file generated in evaluation mode.
+
+## Current strengths
+
+- The repository already goes beyond raw detection and includes match-level logic.
+- Ball tracking uses several complementary signals instead of trusting YOLO confidence alone.
+- Scoreboard OCR is integrated into the rally logic rather than treated as a standalone demo.
+- Events are persisted in a structured way that is useful for later inspection.
+- The project already contains practical debugging tools for reviewing results.
+
+## Current limitations
+
+- Full startup is still manual because court calibration and scoreboard ROI selection are interactive.
+- The scoreboard OCR is tuned to the scoreboard style used in the current videos and is not yet a generic OCR solution.
+- Event classification is heuristic and research-oriented, not yet benchmarked against annotated ground truth.
+- The repository depends on local videos that are not included here.
+- Configuration is still code-first through [`config.py`](config.py), with several environment-specific assumptions.
+- There is no packaged dependency file or installation script yet.
+- Some utility scripts are experimental and still reflect thesis iteration rather than production hardening.
+
+## Thesis context
+
+This project is part of a thesis-oriented effort toward automatic volleyball statistics from video.
+
+The research direction includes:
+
+- robust volleyball ball tracking in real match footage
+- rally understanding from temporal and geometric cues
+- scoreboard-assisted validation
+- event detection for spike, block, ace, and error scenarios
+- persistent outputs that can support later statistical analysis
+
+In other words, this repository is currently best described as a working prototype for volleyball video analytics, not yet as a finished product for automatic official statistics.
+
+## Author
+
+Bruno
+
+Email: `bigbf1130@gmail.com`
+
 GitHub: [brun4fer](https://github.com/brun4fer)

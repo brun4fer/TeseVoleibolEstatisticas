@@ -51,6 +51,9 @@ class ScoreboardOCR:
         self.initial_confirm_reads: int = int(getattr(config, "scoreboard_initial_confirm_reads", 2))
         self.max_points_value: int = int(getattr(config, "scoreboard_max_points_value", 60))
         self.valid_set_values = set(getattr(config, "scoreboard_valid_set_values", (0, 1, 2, 3, 4, 5)))
+        self.max_total_completed_sets: int = int(
+            getattr(config, "scoreboard_max_total_completed_sets", 4)
+        )
         self.pending_candidate: Optional[Tuple[int, int, int, int]] = None
         self.pending_candidate_hits: int = 0
         self.last_pending_score: Optional[Tuple[int, int, int, int]] = None
@@ -63,6 +66,9 @@ class ScoreboardOCR:
         self.last_clean_roi: Optional[np.ndarray] = None
         self.last_preprocessed_debug: Optional[np.ndarray] = None
         self.old_formatted: Optional[str] = None
+
+    def _has_valid_total_sets(self, sets_a: int, sets_b: int) -> bool:
+        return (int(sets_a) + int(sets_b)) <= self.max_total_completed_sets
 
     def _normalize_score(
         self,
@@ -78,6 +84,13 @@ class ScoreboardOCR:
             sets_a = int(reference[0]) if reference is not None else 0
         if sets_b not in self.valid_set_values:
             sets_b = int(reference[2]) if reference is not None else 0
+        if not self._has_valid_total_sets(sets_a, sets_b):
+            if reference is not None and self._has_valid_total_sets(int(reference[0]), int(reference[2])):
+                sets_a = int(reference[0])
+                sets_b = int(reference[2])
+            else:
+                self.last_reject_reason = "invalid_total_sets"
+                return None
         if not (0 <= points_a <= self.max_points_value and 0 <= points_b <= self.max_points_value):
             self.last_reject_reason = "points_out_of_range"
             return None
@@ -93,6 +106,8 @@ class ScoreboardOCR:
 
         # Hard sanity limits to reject OCR explosions such as 32-6.
         if not (0 <= na_set <= 5 and 0 <= nb_set <= 5 and 0 <= na_pts <= 60 and 0 <= nb_pts <= 60):
+            return False
+        if not self._has_valid_total_sets(na_set, nb_set):
             return False
 
         if prev_score is None:
