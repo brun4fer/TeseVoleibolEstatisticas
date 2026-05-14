@@ -20,8 +20,14 @@ class Config:
     event_store_file: Path = Path("outputs/volleyball_events.json")
 
     # Time window (absolute timestamps in the video)
-    start_ts: str = "00:34:25"
-    # start_ts: str = "00:27:21"
+    # Inicio 
+    start_ts: str = "00:26:30"
+    # 3-0 
+    # start_ts: str = "00:27:20"
+    # 6-2
+    # start_ts: str = "00:29:55"
+    # start_ts: str = "00:34:25"
+    # start_ts: str = "00:27:45"
     # start_ts: str = "00:29:53"
     end_ts: str = "00:46:17"
 
@@ -40,7 +46,7 @@ class Config:
     # Tracking / analytics params
     max_trail: int = 60
     spike_speed_thresh: float = 14.0  # pixels / frame
-    spike_speed_threshold_px: float = 8.0  # threshold for SPIKE vs FREEBALL
+    spike_speed_threshold_px: float = 14.0  # threshold for SPIKE vs ATTACK
     block_speed_inversion_ratio: float = -0.6
     spike_dir_change_cos: float = -0.35  # inversao de direcao para spike
     ace_max_duration_s: float = 3.0

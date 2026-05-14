@@ -24,7 +24,7 @@ Implemented today:
 - manual court calibration and court-plane projection in [`calibration.py`](calibration.py)
 - scoreboard OCR based on digit templates in [`scoreboard_template_reader.py`](scoreboard_template_reader.py)
 - scoreboard sanity checks and stable voting in [`analytics.py`](analytics.py)
-- rally closing and point-type classification such as spike, block, ace, error, freeball, and ball-on-net
+- rally closing and point-type classification such as spike, attack, block, ace, ball-out, error, and ball-on-net
 - persistent event storage in [`event_store.py`](event_store.py)
 - event review tools in [`stats_ui.py`](stats_ui.py) and [`stats_debug.py`](stats_debug.py)
 

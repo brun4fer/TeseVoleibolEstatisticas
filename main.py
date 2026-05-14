@@ -114,8 +114,11 @@ def main(evaluation_mode: bool = False):
         stats_summary = {
             "numero_rallies": len(analytics.rally_mgr.finished),
             "numero_spikes": analytics.counts.get("POINT_BY_SPIKE", 0),
+            "numero_ataques": analytics.counts.get("POINT_BY_ATTACK", 0),
             "numero_blocos": analytics.counts.get("POINT_BY_BLOCK", 0),
-            "numero_indefinidos": analytics.counts.get("OPPONENT_ERROR", 0) + analytics.counts.get("FREEBALL", 0) + analytics.counts.get("BOLA_NA_REDE", 0),
+            "numero_bolas_fora": analytics.counts.get("BOLA_PARA_FORA", 0),
+            "numero_bolas_na_rede": analytics.counts.get("BOLA_NA_REDE", 0),
+            "numero_indefinidos": analytics.counts.get("RALLY_ONLY", 0),
             "pontos_equipa_A": analytics.ocr.stable_score[0] if analytics.ocr.stable_score else 0,
             "pontos_equipa_B": analytics.ocr.stable_score[1] if analytics.ocr.stable_score else 0,
             "score_final": f"{analytics.ocr.stable_score[0] if analytics.ocr.stable_score else 0}-{analytics.ocr.stable_score[1] if analytics.ocr.stable_score else 0}"

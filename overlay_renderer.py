@@ -346,7 +346,7 @@ def draw_live_score_panel(frame, snapshot):
 
 def draw_simple_stats_panel(frame, counts: Dict[str, int]):
     panel_w = 240
-    panel_h = 145
+    panel_h = 190
     x0 = max(12, frame.shape[1] - panel_w - 12)
     y0 = 96
     cv2.rectangle(frame, (x0, y0), (x0 + panel_w, y0 + panel_h), (18, 18, 18), -1)
@@ -354,7 +354,10 @@ def draw_simple_stats_panel(frame, counts: Dict[str, int]):
     cv2.putText(frame, "Estatisticas", (x0 + 14, y0 + 24), cv2.FONT_HERSHEY_SIMPLEX, 0.62, (240, 240, 240), 2)
     lines = [
         f"Spikes: {int(counts.get('spike', 0))}",
+        f"Ataques: {int(counts.get('attack', 0))}",
         f"Blocos: {int(counts.get('block', 0))}",
+        f"Bolas fora: {int(counts.get('ball_out', 0))}",
+        f"Bolas rede: {int(counts.get('ball_on_net', 0))}",
         f"Indefinidos: {int(counts.get('undefined', 0))}",
         f"Rallies: {int(counts.get('rallies', 0))}",
     ]
@@ -385,7 +388,12 @@ def draw_event_banner(frame, event_snapshot: Optional[Dict], timestamp_s: float,
         reason = reason[:39] + "..."
     label_map = {
         "spike": "Spike",
+        "attack": "Ataque",
         "block": "Bloco",
+        "ball_out": "Bola para fora",
+        "ball_on_net": "Bola na rede",
+        "error": "Erro",
+        "ace": "Ace",
         "undefined": "Indefinido",
     }
     label = label_map.get(event_type, event_type.title())

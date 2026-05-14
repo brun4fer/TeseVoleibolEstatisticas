@@ -16,20 +16,24 @@ import cv2
 
 
 CATEGORY_SPIKE = "spike"
+CATEGORY_ATTACK = "attack"
 CATEGORY_BLOCK = "block"
 CATEGORY_ACE = "ace"
 CATEGORY_ERROR = "error"            # ponto perdido por erro (atacante manda fora, na rede, etc.)
 CATEGORY_FREEBALL = "freeball"
 CATEGORY_BALL_ON_NET = "ball_on_net"
+CATEGORY_BALL_OUT = "ball_out"
 CATEGORY_UNDEFINED = "undefined"
 
 ALL_CATEGORIES = (
     CATEGORY_SPIKE,
+    CATEGORY_ATTACK,
     CATEGORY_BLOCK,
     CATEGORY_ACE,
     CATEGORY_ERROR,
     CATEGORY_FREEBALL,
     CATEGORY_BALL_ON_NET,
+    CATEGORY_BALL_OUT,
     CATEGORY_UNDEFINED,
 )
 

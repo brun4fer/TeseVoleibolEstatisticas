@@ -22,7 +22,9 @@ from block_detection import BlockAssessment, BlockDetector, BlockDetectorConfig
 from config import config
 from event_store import (
     CATEGORY_ACE,
+    CATEGORY_ATTACK,
     CATEGORY_BALL_ON_NET,
+    CATEGORY_BALL_OUT,
     CATEGORY_BLOCK,
     CATEGORY_ERROR,
     CATEGORY_FREEBALL,
@@ -462,9 +464,11 @@ def classify_point(
     if direction_flip and near_net and not on_net_line:
         return "POINT_BY_SPIKE"
     if not impact_in:
-        return "OPPONENT_ERROR"
+        return "BOLA_PARA_FORA"
     if max_speed_px >= config.spike_speed_thresh and acceleration > config.spike_speed_thresh and near_net:
         return "POINT_BY_SPIKE"
+    if near_net:
+        return "POINT_BY_ATTACK"
     return "UNKNOWN"
 
 
@@ -487,14 +491,16 @@ def draw_sidebar(frame, rally_mgr: RallyManager, counts: Dict[str, int], rally_c
     panel_w = 240
     x0 = w - panel_w - pad
     y0 = pad
-    cv2.rectangle(frame, (x0, y0), (x0 + panel_w, y0 + 235), (0, 0, 0), -1)
+    cv2.rectangle(frame, (x0, y0), (x0 + panel_w, y0 + 285), (0, 0, 0), -1)
     cv2.putText(frame, "Stats", (x0 + 10, y0 + 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
     lines = [
         f"Aces: {counts.get('ACE', 0)}",
         f"Spikes: {counts.get('Spikes', counts.get('POINT_BY_SPIKE', 0))}",
+        f"Ataques: {counts.get('Ataques', counts.get('POINT_BY_ATTACK', 0))}",
         f"Blocks: {counts.get('Blocks', counts.get('POINT_BY_BLOCK', 0))}",
         f"Freeballs: {counts.get('Freeballs', counts.get('FREEBALL', 0))}",
         f"Bolas na Rede: {counts.get('Bolas na Rede', counts.get('BOLA_NA_REDE', 0))}",
+        f"Bolas Fora: {counts.get('Bolas Fora', counts.get('BOLA_PARA_FORA', 0))}",
         f"Errors: {counts.get('OPPONENT_ERROR', 0)}",
         f"Rallies: {rally_count}",
     ]
@@ -517,14 +523,19 @@ class AnalyticsEngine:
         self.counts = {
             "ACE": 0,
             "POINT_BY_SPIKE": 0,
+            "POINT_BY_ATTACK": 0,
             "POINT_BY_BLOCK": 0,
             "FREEBALL": 0,
             "BOLA_NA_REDE": 0,
+            "BOLA_PARA_FORA": 0,
             "OPPONENT_ERROR": 0,
+            "RALLY_ONLY": 0,
             "Spikes": 0,
+            "Ataques": 0,
             "Blocks": 0,
             "Freeballs": 0,
             "Bolas na Rede": 0,
+            "Bolas Fora": 0,
             "Rallies": 0,
         }
         self.prev_score: Optional[Tuple[int, int, int, int]] = None
@@ -817,8 +828,8 @@ class AnalyticsEngine:
         self.last_block_assessment = BlockAssessment(reasons=["initialized"])
 
     def _event_category(self, ptype: str, resultado: str, inconclusivo: bool) -> str:
-        # Mapeia (ptype, resultado) → categoria do event_store. ACE, ERROR,
-        # FREEBALL e BALL_ON_NET são categorias de primeira classe, deixando
+        # Mapeia (ptype, resultado) -> categoria do event_store. ACE, ATTACK,
+        # BALL_OUT, ERROR e BALL_ON_NET sao categorias de primeira classe, deixando
         # `undefined` apenas para casos genuinamente inconclusivos.
         ptype_u = str(ptype or "").upper()
         resultado_u = str(resultado or "").upper()
@@ -826,12 +837,16 @@ class AnalyticsEngine:
             return CATEGORY_BLOCK
         if ptype_u == "POINT_BY_SPIKE" or resultado_u == "SPIKE":
             return CATEGORY_SPIKE
+        if ptype_u == "POINT_BY_ATTACK" or resultado_u == "ATTACK":
+            return CATEGORY_ATTACK
         if ptype_u == "ACE" or resultado_u == "ACE":
             return CATEGORY_ACE
+        if ptype_u in ("BOLA_PARA_FORA", "BALL_OUT") or resultado_u in ("BALL_OUT", "BOLA_PARA_FORA"):
+            return CATEGORY_BALL_OUT
         if ptype_u in ("OPPONENT_ERROR", "TEAM_ERROR") or resultado_u in ("ERROR", "TEAM_ERROR"):
             return CATEGORY_ERROR
         if ptype_u == "FREEBALL" or resultado_u == "FREEBALL":
-            return CATEGORY_FREEBALL
+            return CATEGORY_ATTACK
         if ptype_u in ("BOLA_NA_REDE", "BALL_ON_NET") or resultado_u == "BALL_ON_NET":
             return CATEGORY_BALL_ON_NET
         return CATEGORY_UNDEFINED
@@ -845,8 +860,13 @@ class AnalyticsEngine:
         if category == CATEGORY_SPIKE:
             speed_bonus = min(max(float(speed_peak), 0.0) / max(self.spike_speed_threshold_px * 2.0, 1.0), 0.35)
             return float(min(0.60 + speed_bonus, 0.95))
+        if category == CATEGORY_ATTACK:
+            speed_bonus = min(max(float(speed_peak), 0.0) / max(self.spike_speed_threshold_px * 2.0, 1.0), 0.20)
+            return float(min(0.58 + speed_bonus, 0.82))
         if category == CATEGORY_ACE:
             return 0.70
+        if category == CATEGORY_BALL_OUT:
+            return 0.68
         if category == CATEGORY_ERROR:
             return 0.65
         if category == CATEGORY_FREEBALL:
@@ -862,8 +882,12 @@ class AnalyticsEngine:
             return self.last_block_assessment.reason_text()
         if category == CATEGORY_SPIKE:
             return "trajectory_spike_classification"
+        if category == CATEGORY_ATTACK:
+            return "controlled_attack_classification"
         if category == CATEGORY_ACE:
             return "service_ace"
+        if category == CATEGORY_BALL_OUT:
+            return "attack_crossed_and_scoreboard_awarded_defender"
         if category == CATEGORY_ERROR:
             return "attack_error_or_team_error"
         if category == CATEGORY_FREEBALL:
@@ -1045,11 +1069,19 @@ class AnalyticsEngine:
         new_b_pts = int(prev_b_pts) + (1 if team_b_plus_one else 0)
         return (int(prev_a_set), int(new_a_pts), int(prev_b_set), int(new_b_pts))
 
-    def _team_for_side(self, side: str) -> str:
-        return "TeamA" if side == "CampoA" else "TeamB"
+    def _team_for_side(self, side: Optional[str]) -> Optional[str]:
+        if side == "CampoA":
+            return "TeamA"
+        if side == "CampoB":
+            return "TeamB"
+        return None
 
-    def _other_side(self, side: str) -> str:
-        return "CampoB" if side == "CampoA" else "CampoA"
+    def _other_side(self, side: Optional[str]) -> Optional[str]:
+        if side == "CampoA":
+            return "CampoB"
+        if side == "CampoB":
+            return "CampoA"
+        return None
 
     def _score_plus_one(
         self,
@@ -1447,6 +1479,70 @@ class AnalyticsEngine:
                 sides.append(side)
         return sides
 
+    def _drawer_non_net_sides(self, drawer: List[Tuple[float, float, float]], tracker) -> List[str]:
+        ordered = self._ordered_drawer_copy(drawer)
+        sides: List[str] = []
+        for x, y, _t in ordered:
+            side, in_net_zone = self._side_from_ball_with_net_zone((float(x), float(y)), tracker)
+            if not in_net_zone and side in ("CampoA", "CampoB"):
+                sides.append(side)
+        return sides
+
+    def _infer_attack_side_from_drawer(
+        self,
+        drawer: List[Tuple[float, float, float]],
+        tracker,
+        fallback: Optional[str] = None,
+    ) -> Optional[str]:
+        sides = self._drawer_non_net_sides(drawer, tracker)
+        compressed: List[str] = []
+        for side in sides:
+            if not compressed or compressed[-1] != side:
+                compressed.append(side)
+
+        recent_attack_side = self._last_attack_side()
+        attack_before_last_crossing: Optional[str] = None
+        for prev_side, next_side in zip(compressed, compressed[1:]):
+            if prev_side != next_side:
+                attack_before_last_crossing = prev_side
+        if attack_before_last_crossing in ("CampoA", "CampoB"):
+            service_only_crossing = bool(
+                len(compressed) == 2
+                and self.serving_side in ("CampoA", "CampoB")
+                and compressed[0] == self.serving_side
+                and compressed[1] in ("CampoA", "CampoB")
+            )
+            if (
+                service_only_crossing
+                and recent_attack_side in ("CampoA", "CampoB")
+                and recent_attack_side == compressed[1]
+                and recent_attack_side != attack_before_last_crossing
+            ):
+                return recent_attack_side
+            return attack_before_last_crossing
+
+        for candidate in (
+            recent_attack_side,
+            self.last_attacker_before_net,
+            fallback,
+            self.attacking_side,
+            self.posse_atual,
+            self.campo_posse_atual,
+            self.current_possession,
+        ):
+            if candidate in ("CampoA", "CampoB"):
+                return candidate
+        return sides[0] if sides else None
+
+    def _attack_result_from_speed(self, peak_speed: float) -> Tuple[str, str]:
+        spike_threshold = max(
+            float(getattr(config, "spike_speed_threshold_px", 0.0)),
+            float(getattr(config, "spike_speed_thresh", 0.0)),
+        )
+        if float(peak_speed) >= spike_threshold:
+            return "SPIKE", "POINT_BY_SPIKE"
+        return "ATTACK", "POINT_BY_ATTACK"
+
     def _reset_for_new_service(self, tracker, source: str, seed_point: Optional[Tuple[float, float, float]] = None) -> None:
         if source == "SERVICO":
             if self.service_detection_locked:
@@ -1602,13 +1698,15 @@ class AnalyticsEngine:
             return None
         try:
             x_end, y_end, _ = base_drawer[-1]
-            x_start, y_start, _ = base_drawer[0]
-            side_start_drawer = self._side_from_ball((float(x_start), float(y_start)), tracker)
             lado_fim = self._side_from_ball((float(x_end), float(y_end)), tracker)
-            lado_atacante = self._current_possession_side(fallback=attacker_side or self._last_attack_side())
-            if lado_atacante not in ("CampoA", "CampoB"):
-                lado_atacante = side_start_drawer
-            attack_team_hint = self._current_possession_team(fallback_side=lado_atacante)
+            lado_atacante = self._infer_attack_side_from_drawer(
+                base_drawer,
+                tracker,
+                fallback=attacker_side or self.last_attacker_before_net or self._last_attack_side(),
+            )
+            attack_team_hint = self._team_for_side(lado_atacante)
+            if attack_team_hint not in ("TeamA", "TeamB"):
+                attack_team_hint = self._current_possession_team(fallback_side=lado_atacante)
             if attack_team_hint not in ("TeamA", "TeamB"):
                 attack_team_hint = self._last_attack_team()
 
@@ -1622,17 +1720,46 @@ class AnalyticsEngine:
                     visible_trajectory=visible_trajectory,
                 )
                 self.last_block_assessment = assessment
-                if assessment.attack_side in ("CampoA", "CampoB"):
+                if lado_atacante not in ("CampoA", "CampoB") and assessment.attack_side in ("CampoA", "CampoB"):
                     lado_atacante = assessment.attack_side
+                    attack_team_hint = assessment.attack_team or self._team_for_side(lado_atacante)
                 if assessment.end_side in ("CampoA", "CampoB"):
                     lado_fim = assessment.end_side
 
-            sides_history: List[str] = []
-            for x, y, _t in base_drawer:
-                s, in_net_zone = self._side_from_ball_with_net_zone((float(x), float(y)), tracker)
-                if in_net_zone or s not in ("CampoA", "CampoB"):
-                    continue
-                sides_history.append(s)
+            sides_history = self._drawer_non_net_sides(base_drawer, tracker)
+            compressed_sides: List[str] = []
+            for side_item in sides_history:
+                if not compressed_sides or compressed_sides[-1] != side_item:
+                    compressed_sides.append(side_item)
+            clear_attack_side: Optional[str] = None
+            for prev_side, next_side in zip(compressed_sides, compressed_sides[1:]):
+                if prev_side != next_side:
+                    clear_attack_side = prev_side
+            service_only_crossing = bool(
+                len(compressed_sides) == 2
+                and self.serving_side in ("CampoA", "CampoB")
+                and compressed_sides[0] == self.serving_side
+                and compressed_sides[1] in ("CampoA", "CampoB")
+            )
+            recent_attack_side = self._last_attack_side()
+            if assessment is not None and assessment.attack_side in ("CampoA", "CampoB"):
+                block_like_assessment = assessment.state in (
+                    "net_contact",
+                    "block_candidate",
+                    "possible_block",
+                    "confirmed_block",
+                )
+                detector_matches_recent_attack = recent_attack_side in ("CampoA", "CampoB") and assessment.attack_side == recent_attack_side
+                detector_matches_receiver_phase = service_only_crossing and assessment.attack_side == compressed_sides[-1]
+                if block_like_assessment and (detector_matches_recent_attack or detector_matches_receiver_phase):
+                    if lado_atacante != assessment.attack_side:
+                        print(
+                            f"[ATTACK-SIDE-OVERRIDE] ataque final ajustado: "
+                            f"heuristica={lado_atacante} -> detector={assessment.attack_side}"
+                        )
+                    lado_atacante = assessment.attack_side
+                    attack_team_hint = assessment.attack_team or self._team_for_side(lado_atacante)
+                    clear_attack_side = assessment.attack_side
             crossed = False
             if len(sides_history) >= 2:
                 prev_s = sides_history[0]
@@ -1647,53 +1774,108 @@ class AnalyticsEngine:
             peak_speed, _mean_speed = self._speed_metrics_from_drawer(base_drawer)
             crossed = bool(crossed or (assessment.crossed_net if assessment is not None else False))
 
-            # ── Âncora pelo winner_team (fonte de verdade do OCR) ──────────────
-            # Quando a trajetória está incompleta (bola perdida ao cruzar a rede)
-            # o OCR confirma quem marcou e permite corrigir a classificação.
+            attack_team = self._team_for_side(lado_atacante)
+            defending_side = self._other_side(lado_atacante)
+            defending_team = self._team_for_side(defending_side)
+
+            # Ancora pelo winner_team (fonte de verdade do OCR).
+            # Quando a trajetoria esta incompleta (bola perdida ao cruzar a rede)
+            # o OCR confirma quem marcou e permite corrigir a classificacao.
             winner_is_attacker = (
                 winner_team not in (None, "Unknown")
-                and winner_team == attack_team_hint
+                and winner_team == attack_team
+                and lado_atacante in ("CampoA", "CampoB")
+            )
+            winner_is_defender = (
+                winner_team not in (None, "Unknown")
+                and winner_team == defending_team
                 and lado_atacante in ("CampoA", "CampoB")
             )
             if winner_is_attacker:
                 if assessment is not None and assessment.state == "confirmed_block":
-                    # Impossível: bloco daria ponto ao defensor, não ao atacante.
+                    # Impossivel: bloco daria ponto ao defensor, nao ao atacante.
                     print(
                         f"[BLOCK-OVERRIDE] confirmed_block anulado: "
                         f"vencedor={winner_team} é o atacante ({attack_team_hint})"
                     )
                     assessment = None
                 if not crossed and lado_fim == lado_atacante:
-                    # Trajetória incompleta: bola perdida ao cruzar a rede.
-                    # Atacante marcou → inferimos cruzamento para o campo adversário.
+                    # Trajetoria incompleta: bola perdida ao cruzar a rede.
+                    # Atacante marcou: inferimos cruzamento para o campo adversario.
                     crossed = True
                     lado_fim = self._other_side(lado_atacante)
                     print(
                         f"[CROSS-INFERRED] Bola perdida na rede, "
-                        f"vencedor={winner_team} → cruzamento inferido, lado_fim={lado_fim}"
+                        f"vencedor={winner_team} -> cruzamento inferido, lado_fim={lado_fim}"
                     )
 
-            if assessment is not None and assessment.state == "confirmed_block":
+            assessment_attack_matches = bool(
+                assessment is not None
+                and (
+                    clear_attack_side not in ("CampoA", "CampoB")
+                    or assessment.attack_side not in ("CampoA", "CampoB")
+                    or assessment.attack_side == clear_attack_side
+                )
+            )
+            block_returned_to_attacker = bool(
+                assessment is not None
+                and assessment.attack_side in ("CampoA", "CampoB")
+                and (
+                    assessment.return_side == assessment.attack_side
+                    or (lado_fim == assessment.attack_side and not (crossed and lado_fim != lado_atacante))
+                )
+            )
+            confirmed_block = bool(
+                assessment is not None
+                and assessment.state == "confirmed_block"
+                and assessment_attack_matches
+                and block_returned_to_attacker
+                and winner_team not in (None, "Unknown")
+                and winner_team == assessment.blocking_team
+            )
+            if assessment is not None and assessment.state == "confirmed_block" and not confirmed_block:
+                print(
+                    f"[BLOCK-OVERRIDE] bloco rejeitado por consistencia: "
+                    f"winner={winner_team}, attack={lado_atacante}/{attack_team}, "
+                    f"assessment_attack={assessment.attack_side}, return={assessment.return_side}, fim={lado_fim}"
+                )
+
+            if confirmed_block:
                 resultado = "BLOCK"
-            elif assessment is not None and assessment.event_type == "BOLA_NA_REDE":
+            elif (
+                assessment is not None
+                and assessment.event_type == "BOLA_NA_REDE"
+                and not (crossed and lado_fim != lado_atacante)
+            ):
                 resultado = "BALL_ON_NET"
-            elif lado_atacante is None or lado_fim is None:
+            elif lado_atacante is None:
+                resultado = "ERROR"
+            elif lado_fim is None and winner_is_defender and crossed:
+                resultado = "BALL_OUT"
+            elif lado_fim is None and winner_is_attacker:
+                resultado, _ptype = self._attack_result_from_speed(peak_speed)
+            elif lado_fim is None:
                 resultado = "ERROR"
             elif (
                 crossed
                 and lado_fim != lado_atacante
                 and self.rally_crossings <= 1
                 and lado_atacante == self.serving_side
+                and winner_is_attacker
             ):
-                # Serviço direto: bola cruzou a rede uma só vez sem retorno do adversário.
+                # Servico direto: bola cruzou a rede uma so vez sem retorno do adversario.
                 resultado = "ACE"
-            elif crossed and lado_fim != lado_atacante and peak_speed > self.spike_speed_threshold_px:
-                resultado = "SPIKE"
-            elif crossed and lado_fim != lado_atacante and peak_speed <= self.spike_speed_threshold_px:
-                resultado = "FREEBALL"
+            elif crossed and lado_fim != lado_atacante and winner_is_defender:
+                resultado = "BALL_OUT"
+            elif crossed and lado_fim != lado_atacante:
+                resultado, _ptype = self._attack_result_from_speed(peak_speed)
             elif not crossed and lado_fim == lado_atacante:
-                # Bola terminou no campo do atacante (erro na rede ou fora).
-                resultado = "TEAM_ERROR"
+                # Bola terminou no campo do atacante: rede/erro do atacante.
+                resultado = "BALL_ON_NET" if self.tocou_rede or self.ball_in_zone_flag else "TEAM_ERROR"
+            elif winner_is_defender:
+                resultado = "BALL_OUT"
+            elif winner_is_attacker:
+                resultado, _ptype = self._attack_result_from_speed(peak_speed)
             else:
                 resultado = "ERROR"
             block_reason = assessment.reason_text() if assessment is not None else "na"
@@ -2596,7 +2778,9 @@ class AnalyticsEngine:
                 drawer=analysis_drawer,
             )
             x_inicio = float(drawer_start[0])
-            lado_origem = self._side_from_x_position(x_inicio, tracker)
+            lado_origem = self._infer_attack_side_from_drawer(analysis_drawer, tracker)
+            if lado_origem not in ("CampoA", "CampoB"):
+                lado_origem = self._side_from_x_position(x_inicio, tracker)
 
             print(
                 f"[STAS-VALID] Placar mudou. Frames na gaveta: {len(analysis_drawer)}. "
@@ -2613,16 +2797,22 @@ class AnalyticsEngine:
                 game_rule_possession = game_context.get("possession_side")
                 game_rule_possession_team = game_context.get("possession_team")
             net_crossing_detected = bool(self.rally_crossings > 0 or game_rule_crossings > 0 or self._drawer_crossed_net(tracker))
-            attacker_hint = self._current_possession_side(
-                game_context=game_context,
+            attacker_hint = self._infer_attack_side_from_drawer(
+                analysis_drawer,
+                tracker,
                 fallback=self.last_attacker_before_net or self._last_attack_side(),
             )
             if attacker_hint not in ("CampoA", "CampoB"):
                 tracker_attacker = getattr(tracker, "attacking_side", None)
-                attacker_hint = tracker_attacker if tracker_attacker in ("CampoA", "CampoB") else self.campo_posse_atual
+                attacker_hint = tracker_attacker if tracker_attacker in ("CampoA", "CampoB") else self._current_possession_side(
+                    game_context=game_context,
+                    fallback=self.campo_posse_atual,
+                )
             if attacker_hint not in ("CampoA", "CampoB") and game_rule_possession in ("CampoA", "CampoB"):
                 attacker_hint = game_rule_possession
-            attacker_team_hint = self._current_possession_team(game_context=game_context, fallback_side=attacker_hint)
+            attacker_team_hint = self._team_for_side(attacker_hint)
+            if attacker_team_hint not in ("TeamA", "TeamB"):
+                attacker_team_hint = self._current_possession_team(game_context=game_context, fallback_side=attacker_hint)
             if attacker_team_hint not in ("TeamA", "TeamB") and game_rule_possession_team in ("TeamA", "TeamB"):
                 attacker_team_hint = game_rule_possession_team
             if attacker_team_hint not in ("TeamA", "TeamB"):
@@ -2654,13 +2844,12 @@ class AnalyticsEngine:
                 # Evita deixar o ponto como RALLY_ONLY/inconclusivo quando temos informação do vencedor.
                 if winner not in (None, "Unknown") and attacker_hint in ("CampoA", "CampoB"):
                     if winner == attacker_team_hint:
-                        # Atacante marcou sem trajetória detetada → spike inferido
+                        # Atacante marcou sem trajetoria suficiente: usa velocidade para separar spike/ataque.
                         inconclusivo = False
-                        resultado = "SPIKE"
-                        ptype = "POINT_BY_SPIKE"
+                        resultado, ptype = self._attack_result_from_speed(speed_peak)
                         print(
-                            f"[INFERRED-SPIKE] Vencedor={winner} é o atacante "
-                            f"({attacker_team_hint}) → SPIKE inferido (sem trajetória)"
+                            f"[INFERRED-ATTACK] Vencedor={winner} é o atacante "
+                            f"({attacker_team_hint}) -> {resultado} inferido (sem trajetória)"
                         )
                     else:
                         # Defensor marcou → atacante cometeu erro
@@ -2692,14 +2881,22 @@ class AnalyticsEngine:
                         inconclusivo = False
                         resultado = "SPIKE"
                         ptype = "POINT_BY_SPIKE"
+                    elif decision_result == "ATTACK":
+                        inconclusivo = False
+                        resultado = "ATTACK"
+                        ptype = "POINT_BY_ATTACK"
                     elif decision_result == "FREEBALL":
                         inconclusivo = False
-                        resultado = "FREEBALL"
-                        ptype = "FREEBALL"
+                        resultado = "ATTACK"
+                        ptype = "POINT_BY_ATTACK"
                     elif decision_result == "BALL_ON_NET":
                         inconclusivo = False
                         resultado = "BALL_ON_NET"
                         ptype = "BOLA_NA_REDE"
+                    elif decision_result == "BALL_OUT":
+                        inconclusivo = False
+                        resultado = "BALL_OUT"
+                        ptype = "BOLA_PARA_FORA"
                     elif decision_result == "ACE":
                         inconclusivo = False
                         resultado = "ACE"
@@ -2713,11 +2910,10 @@ class AnalyticsEngine:
                     # Usar o winner como âncora de último recurso.
                     if winner == attacker_team_hint:
                         inconclusivo = False
-                        resultado = "SPIKE"
-                        ptype = "POINT_BY_SPIKE"
+                        resultado, ptype = self._attack_result_from_speed(speed_peak)
                         print(
-                            f"[INFERRED-SPIKE] pm=None, vencedor={winner} é atacante "
-                            f"({attacker_team_hint}) → SPIKE inferido"
+                            f"[INFERRED-ATTACK] pm=None, vencedor={winner} é atacante "
+                            f"({attacker_team_hint}) -> {resultado} inferido"
                         )
                     else:
                         inconclusivo = False
@@ -2733,12 +2929,15 @@ class AnalyticsEngine:
                 if lado_origem in ("CampoA", "CampoB"):
                     if resultado == "BLOCK":
                         winner_effective = self._team_for_side(self._other_side(lado_origem))
-                    elif resultado in ("SPIKE", "FREEBALL"):
+                    elif resultado in ("SPIKE", "ATTACK", "FREEBALL"):
                         winner_effective = self._team_for_side(lado_origem)
+                    elif resultado == "BALL_OUT":
+                        winner_effective = self._team_for_side(self._other_side(lado_origem))
                 elif self.posse_atual in ("CampoA", "CampoB"):
                     winner_effective = self._team_for_side(self.posse_atual)
 
             final_score = self.pending_score_change
+            prev_score_for_event = self.pending_score_prev_base
 
             self.point_finalized = True
             ptype = self.update_stats(baseline_ptype=ptype, winner=winner_effective, timestamp_s=timestamp_s)
@@ -2781,7 +2980,7 @@ class AnalyticsEngine:
                 speed_mean=speed_mean,
                 attacker_side=lado_origem,
                 final_score=final_score,
-                prev_score=self.pending_score_prev_base,
+                prev_score=prev_score_for_event,
             )
 
             self.rally_mgr.end(
@@ -2798,11 +2997,15 @@ class AnalyticsEngine:
                 trajectory=trajectory_for_rally,
             )
             if inconclusivo:
+                self.counts["RALLY_ONLY"] += 1
                 print("[FINAL] Rali terminado, mas trajetória inconclusiva. Apenas +1 no contador de ralis.")
             elif self.point_finalized:
                 if resultado == "SPIKE":
                     self.counts["Spikes"] += 1
                     self.counts["POINT_BY_SPIKE"] += 1
+                elif resultado == "ATTACK":
+                    self.counts["Ataques"] += 1
+                    self.counts["POINT_BY_ATTACK"] += 1
                 elif resultado == "BLOCK":
                     self.counts["Blocks"] += 1
                     self.counts["POINT_BY_BLOCK"] += 1
@@ -2812,6 +3015,9 @@ class AnalyticsEngine:
                 elif resultado == "BALL_ON_NET":
                     self.counts["Bolas na Rede"] += 1
                     self.counts["BOLA_NA_REDE"] += 1
+                elif resultado == "BALL_OUT":
+                    self.counts["Bolas Fora"] += 1
+                    self.counts["BOLA_PARA_FORA"] += 1
 
             # End-of-rally cleanup for next possession/event cycle (hard reset).
             self._reset_for_new_service(tracker, source="OCR")

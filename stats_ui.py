@@ -10,7 +10,9 @@ from tkinter import ttk
 from config import config
 from event_store import (
     CATEGORY_ACE,
+    CATEGORY_ATTACK,
     CATEGORY_BALL_ON_NET,
+    CATEGORY_BALL_OUT,
     CATEGORY_BLOCK,
     CATEGORY_ERROR,
     CATEGORY_FREEBALL,
@@ -44,20 +46,24 @@ FONT_EMOJI = "Segoe UI Emoji"
 
 META = {
     CATEGORY_SPIKE: {"label": "Spikes", "singular": "Spike", "icon": "\U0001F525", "badge_bg": "#FFEDD5", "badge_fg": "#C2410C"},
+    CATEGORY_ATTACK: {"label": "Ataques", "singular": "Ataque", "icon": "\U0001F3D0", "badge_bg": "#DCFCE7", "badge_fg": "#166534"},
     CATEGORY_BLOCK: {"label": "Blocos", "singular": "Bloco", "icon": "\U0001F9F1", "badge_bg": "#DBEAFE", "badge_fg": "#1D4ED8"},
     CATEGORY_ACE: {"label": "Aces", "singular": "Ace", "icon": "\U0001F3AF", "badge_bg": "#FEF3C7", "badge_fg": "#92400E"},
     CATEGORY_ERROR: {"label": "Erros", "singular": "Erro", "icon": "\u26a0", "badge_bg": "#FEE2E2", "badge_fg": "#B91C1C"},
     CATEGORY_FREEBALL: {"label": "Freeballs", "singular": "Freeball", "icon": "\U0001F4A8", "badge_bg": "#D1FAE5", "badge_fg": "#047857"},
     CATEGORY_BALL_ON_NET: {"label": "Bola na Rede", "singular": "Bola na Rede", "icon": "\U0001F3D0", "badge_bg": "#E0E7FF", "badge_fg": "#3730A3"},
+    CATEGORY_BALL_OUT: {"label": "Bola para Fora", "singular": "Bola para Fora", "icon": "\u2197", "badge_bg": "#FEE2E2", "badge_fg": "#991B1B"},
     CATEGORY_UNDEFINED: {"label": "Indefinidos", "singular": "Indefinido", "icon": "\u2753", "badge_bg": "#EDE9FE", "badge_fg": "#6D28D9"},
 }
 ORDER = (
     CATEGORY_SPIKE,
+    CATEGORY_ATTACK,
     CATEGORY_BLOCK,
     CATEGORY_ACE,
     CATEGORY_ERROR,
-    CATEGORY_FREEBALL,
     CATEGORY_BALL_ON_NET,
+    CATEGORY_BALL_OUT,
+    CATEGORY_FREEBALL,
     CATEGORY_UNDEFINED,
 )
 
@@ -160,7 +166,7 @@ class StatsUI(tk.Tk):
         tk.Label(left, text="Dashboard de Eventos", font=(FONT, 20, "bold"), fg=TEXT, bg=CARD_BG).pack(anchor="w")
         tk.Label(
             left,
-            text="Interface de consulta para spikes, blocos e eventos indefinidos.",
+            text="Interface de consulta para spikes, ataques, blocos e eventos de erro.",
             font=(FONT, 10),
             fg=TEXT_SOFT,
             bg=CARD_BG,
@@ -341,10 +347,11 @@ class StatsUI(tk.Tk):
             widgets["card"].configure(bg=bg, highlightbackground=border)
             widgets["stripe"].configure(bg=PRIMARY if selected else bg)
             widgets["body"].configure(bg=bg)
+            badge_bgs = {meta["badge_bg"] for meta in META.values()}
             for child in widgets["body"].winfo_children():
                 child.configure(bg=bg)
                 for nested in child.winfo_children():
-                    if isinstance(nested, tk.Label) and nested.cget("bg") not in (TEAM_A_BG, TEAM_B_BG, NEUTRAL_BG, META[CATEGORY_SPIKE]["badge_bg"], META[CATEGORY_BLOCK]["badge_bg"], META[CATEGORY_UNDEFINED]["badge_bg"]):
+                    if isinstance(nested, tk.Label) and nested.cget("bg") not in (TEAM_A_BG, TEAM_B_BG, NEUTRAL_BG, *badge_bgs):
                         nested.configure(bg=bg)
 
     def _render_details(self, event: dict | None) -> None:
@@ -470,7 +477,15 @@ class StatsUI(tk.Tk):
 
     @staticmethod
     def _point_type(value) -> str:
-        mapping = {"POINT_BY_SPIKE": "Ponto por Spike", "POINT_BY_BLOCK": "Ponto por Bloco", "FREEBALL": "Freeball", "BOLA_NA_REDE": "Bola na Rede", "RALLY_ONLY": "Rally sem classificacao"}
+        mapping = {
+            "POINT_BY_SPIKE": "Ponto por Spike",
+            "POINT_BY_ATTACK": "Ponto por Ataque",
+            "POINT_BY_BLOCK": "Ponto por Bloco",
+            "FREEBALL": "Ataque",
+            "BOLA_NA_REDE": "Bola na Rede",
+            "BOLA_PARA_FORA": "Bola para Fora",
+            "RALLY_ONLY": "Rally sem classificacao",
+        }
         return "--" if value in (None, "", "--") else mapping.get(str(value), str(value).replace("_", " ").title())
 
     @staticmethod
