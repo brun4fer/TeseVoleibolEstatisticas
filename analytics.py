@@ -491,11 +491,10 @@ def draw_sidebar(frame, rally_mgr: RallyManager, counts: Dict[str, int], rally_c
     panel_w = 240
     x0 = w - panel_w - pad
     y0 = pad
-    cv2.rectangle(frame, (x0, y0), (x0 + panel_w, y0 + 285), (0, 0, 0), -1)
+    cv2.rectangle(frame, (x0, y0), (x0 + panel_w, y0 + 260), (0, 0, 0), -1)
     cv2.putText(frame, "Stats", (x0 + 10, y0 + 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
     lines = [
         f"Aces: {counts.get('ACE', 0)}",
-        f"Spikes: {counts.get('Spikes', counts.get('POINT_BY_SPIKE', 0))}",
         f"Ataques: {counts.get('Ataques', counts.get('POINT_BY_ATTACK', 0))}",
         f"Blocks: {counts.get('Blocks', counts.get('POINT_BY_BLOCK', 0))}",
         f"Freeballs: {counts.get('Freeballs', counts.get('FREEBALL', 0))}",
@@ -836,7 +835,7 @@ class AnalyticsEngine:
         if ptype_u == "POINT_BY_BLOCK" or resultado_u == "BLOCK":
             return CATEGORY_BLOCK
         if ptype_u == "POINT_BY_SPIKE" or resultado_u == "SPIKE":
-            return CATEGORY_SPIKE
+            return CATEGORY_ATTACK
         if ptype_u == "POINT_BY_ATTACK" or resultado_u == "ATTACK":
             return CATEGORY_ATTACK
         if ptype_u == "ACE" or resultado_u == "ACE":
@@ -937,6 +936,9 @@ class AnalyticsEngine:
         notes_parts = []
         if prev_score is not None and final_score is not None:
             notes_parts.append(f"score:{prev_score}->{final_score}")
+        if category == CATEGORY_ATTACK:
+            attack_style = "spike_like" if self._is_spike_like_speed(speed_peak) else "controlled"
+            notes_parts.append(f"attack_style:{attack_style}")
         if self.last_block_assessment.reason_text() not in ("ok", "insufficient_trajectory", "no_attack_pattern") and category == CATEGORY_BLOCK:
             notes_parts.append(f"block:{self.last_block_assessment.reason_text()}")
         stored = self.event_store.record_event(
@@ -1534,14 +1536,89 @@ class AnalyticsEngine:
                 return candidate
         return sides[0] if sides else None
 
-    def _attack_result_from_speed(self, peak_speed: float) -> Tuple[str, str]:
+    def _is_spike_like_speed(self, peak_speed: float) -> bool:
         spike_threshold = max(
             float(getattr(config, "spike_speed_threshold_px", 0.0)),
             float(getattr(config, "spike_speed_thresh", 0.0)),
         )
-        if float(peak_speed) >= spike_threshold:
-            return "SPIKE", "POINT_BY_SPIKE"
+        return float(peak_speed) >= spike_threshold
+
+    def _attack_result_from_speed(self, peak_speed: float) -> Tuple[str, str]:
+        # Mantemos o limiar de spike como sinal auxiliar (guardado nas notas
+        # do evento), mas a estatistica final colapsa todos os vencedores
+        # ofensivos para ATTACK.
+        _spike_like = self._is_spike_like_speed(peak_speed)
         return "ATTACK", "POINT_BY_ATTACK"
+
+    def _is_direct_ace_trajectory(
+        self,
+        drawer: List[Tuple[float, float, float]],
+        tracker,
+        attack_side: Optional[str],
+        winner_team: Optional[str],
+    ) -> bool:
+        if attack_side not in ("CampoA", "CampoB"):
+            return False
+        if self.serving_side not in ("CampoA", "CampoB") or attack_side != self.serving_side:
+            return False
+        if winner_team not in ("TeamA", "TeamB") or winner_team != self._team_for_side(attack_side):
+            return False
+
+        ordered = self._ordered_drawer_copy(drawer)
+        if len(ordered) < 3:
+            return False
+
+        sides = self._drawer_non_net_sides(ordered, tracker)
+        compressed: List[str] = []
+        for side in sides:
+            if not compressed or compressed[-1] != side:
+                compressed.append(side)
+
+        receiving_side = self._other_side(attack_side)
+        if receiving_side not in ("CampoA", "CampoB"):
+            return False
+        if len(compressed) < 2 or compressed[0] != attack_side or compressed[-1] != receiving_side:
+            return False
+        first_receiving_idx = compressed.index(receiving_side)
+        if any(side != receiving_side for side in compressed[first_receiving_idx:]):
+            return False
+
+        expected_delta_sign = -1.0 if attack_side == "CampoA" else 1.0
+        significant_delta_px = max(1.0, float(self.net_buffer_px) * 0.08)
+        non_net_signed: List[float] = []
+        for x, y, _t in ordered:
+            side, in_net_zone = self._side_from_ball_with_net_zone((float(x), float(y)), tracker)
+            if in_net_zone or side not in ("CampoA", "CampoB"):
+                continue
+            non_net_signed.append(float(self._signed_side_value((float(x), float(y)), tracker)))
+
+        if len(non_net_signed) < 3:
+            return False
+
+        forward_steps = 0
+        reverse_steps = 0
+        total_forward = 0.0
+        total_reverse = 0.0
+        for prev_signed, curr_signed in zip(non_net_signed, non_net_signed[1:]):
+            delta = float(curr_signed - prev_signed)
+            if abs(delta) < significant_delta_px:
+                continue
+            if expected_delta_sign * delta > 0.0:
+                forward_steps += 1
+                total_forward += abs(delta)
+            else:
+                reverse_steps += 1
+                total_reverse += abs(delta)
+
+        if forward_steps < 2:
+            return False
+        if reverse_steps > 1:
+            return False
+        if reverse_steps > 0 and total_reverse > significant_delta_px:
+            return False
+        if total_reverse > max(significant_delta_px * 2.0, total_forward * 0.18):
+            return False
+        return True
 
     def _reset_for_new_service(self, tracker, source: str, seed_point: Optional[Tuple[float, float, float]] = None) -> None:
         if source == "SERVICO":
@@ -1860,10 +1937,15 @@ class AnalyticsEngine:
                 crossed
                 and lado_fim != lado_atacante
                 and self.rally_crossings <= 1
-                and lado_atacante == self.serving_side
                 and winner_is_attacker
+                and self._is_direct_ace_trajectory(
+                    base_drawer,
+                    tracker,
+                    attack_side=lado_atacante,
+                    winner_team=winner_team,
+                )
             ):
-                # Servico direto: bola cruzou a rede uma so vez sem retorno do adversario.
+                # Servico direto: sem retorno e sem mudanca material de direcao.
                 resultado = "ACE"
             elif crossed and lado_fim != lado_atacante and winner_is_defender:
                 resultado = "BALL_OUT"
@@ -2844,7 +2926,7 @@ class AnalyticsEngine:
                 # Evita deixar o ponto como RALLY_ONLY/inconclusivo quando temos informação do vencedor.
                 if winner not in (None, "Unknown") and attacker_hint in ("CampoA", "CampoB"):
                     if winner == attacker_team_hint:
-                        # Atacante marcou sem trajetoria suficiente: usa velocidade para separar spike/ataque.
+                        # Atacante marcou sem trajetoria suficiente: conta como ATTACK.
                         inconclusivo = False
                         resultado, ptype = self._attack_result_from_speed(speed_peak)
                         print(
@@ -2879,8 +2961,8 @@ class AnalyticsEngine:
                         ptype = "POINT_BY_BLOCK"
                     elif decision_result == "SPIKE":
                         inconclusivo = False
-                        resultado = "SPIKE"
-                        ptype = "POINT_BY_SPIKE"
+                        resultado = "ATTACK"
+                        ptype = "POINT_BY_ATTACK"
                     elif decision_result == "ATTACK":
                         inconclusivo = False
                         resultado = "ATTACK"
@@ -3000,10 +3082,7 @@ class AnalyticsEngine:
                 self.counts["RALLY_ONLY"] += 1
                 print("[FINAL] Rali terminado, mas trajetória inconclusiva. Apenas +1 no contador de ralis.")
             elif self.point_finalized:
-                if resultado == "SPIKE":
-                    self.counts["Spikes"] += 1
-                    self.counts["POINT_BY_SPIKE"] += 1
-                elif resultado == "ATTACK":
+                if resultado in ("SPIKE", "ATTACK"):
                     self.counts["Ataques"] += 1
                     self.counts["POINT_BY_ATTACK"] += 1
                 elif resultado == "BLOCK":

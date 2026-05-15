@@ -113,7 +113,7 @@ def main(evaluation_mode: bool = False):
         import json
         stats_summary = {
             "numero_rallies": len(analytics.rally_mgr.finished),
-            "numero_spikes": analytics.counts.get("POINT_BY_SPIKE", 0),
+            "numero_spikes": 0,
             "numero_ataques": analytics.counts.get("POINT_BY_ATTACK", 0),
             "numero_blocos": analytics.counts.get("POINT_BY_BLOCK", 0),
             "numero_bolas_fora": analytics.counts.get("BOLA_PARA_FORA", 0),

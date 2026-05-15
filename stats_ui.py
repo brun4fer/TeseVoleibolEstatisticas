@@ -77,7 +77,7 @@ class StatsUI(tk.Tk):
         self.minsize(1180, 720)
         self.configure(bg=APP_BG)
 
-        self.current_category = CATEGORY_SPIKE
+        self.current_category = CATEGORY_ATTACK
         self.current_events = []
         self.selected_event = None
         self.selected_event_id = None
@@ -96,7 +96,7 @@ class StatsUI(tk.Tk):
 
         self.status_var = tk.StringVar(value="0 eventos")
         self.updated_var = tk.StringVar(value="Sem atualizacoes")
-        self.list_title_var = tk.StringVar(value="Spikes")
+        self.list_title_var = tk.StringVar(value="Ataques")
         self.list_subtitle_var = tk.StringVar(value="Selecione um evento para ver os detalhes.")
 
         self._styles()
@@ -478,7 +478,7 @@ class StatsUI(tk.Tk):
     @staticmethod
     def _point_type(value) -> str:
         mapping = {
-            "POINT_BY_SPIKE": "Ponto por Spike",
+            "POINT_BY_SPIKE": "Ponto por Ataque",
             "POINT_BY_ATTACK": "Ponto por Ataque",
             "POINT_BY_BLOCK": "Ponto por Bloco",
             "FREEBALL": "Ataque",
