@@ -408,9 +408,10 @@ def match_digits_by_components(
         return None
     if max_digits > 0 and len(components) > max_digits:
         return None
-    if max_digits > 1 and len(components) != 1:
-        return None
     if max_digits > 1 and len(components) == 1:
+        # Single-component fallback is acceptable for point regions when only
+        # one narrow digit is visible. Genuine two-digit scores such as 10 must
+        # also be allowed through this path when two components are present.
         single_component_width = int(components[0].shape[1])
         if single_component_width > int(round(binary.shape[1] * 0.55)):
             return None

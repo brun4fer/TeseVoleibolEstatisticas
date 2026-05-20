@@ -27,9 +27,10 @@ class Config:
     # 6-2
     #start_ts: str = "00:29:55"
     # start_ts: str = "00:34:25"
-    # start_ts: str = "00:27:45"
-    start_ts: str = "00:31:42"
-    end_ts: str = "00:46:17"
+    # 10 - 5
+    start_ts: str = "00:46:17"
+    #start_ts: str = "00:31:42"
+    end_ts: str = "00:47:17"
 
     # Models
     yolo_model: str = "yolov8s.pt"  # modelo small para melhor detecção de bola
