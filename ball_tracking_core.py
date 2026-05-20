@@ -695,6 +695,7 @@ def select_ball_candidate_by_score(
     candidate_evaluator: Optional[Callable[[Dict], Dict]] = None,
     net_zone_evaluator: Optional[Callable[[Tuple[int, int]], bool]] = None,
     pixel_to_court_m: Optional[Callable[[Tuple[int, int]], Tuple[float, float]]] = None,
+    tracking_policy: Optional[Dict] = None,
 ) -> Tuple[Optional[Dict], str, Optional[Dict], float, bool]:
     """Seleciona o candidato com maior score que passe o threshold.
 
@@ -726,6 +727,13 @@ def select_ball_candidate_by_score(
     if not candidate_pool:
         return None, "rejected_by_game_context", best_context_rejected, 0.0, False
 
+    policy = dict(tracking_policy or {})
+    disable_score_recovery = bool(policy.get("disable_score_recovery", False))
+    min_reacquire_score = float(policy.get("min_reacquire_score", 0.0) or 0.0)
+    reject_weak_cross_court = bool(policy.get("reject_weak_cross_court", False))
+    cross_court_min_score = float(policy.get("cross_court_min_score", 0.0) or 0.0)
+    preferred_side = policy.get("preferred_side")
+
     scored: List[Tuple[float, bool, Dict]] = []
     for candidate in candidate_pool:
         in_net = bool(net_zone_evaluator(candidate["center"])) if net_zone_evaluator else False
@@ -743,7 +751,6 @@ def select_ball_candidate_by_score(
             cfg=cfg,
             pixel_to_court_m=pixel_to_court_m,
         )
-        scored.append((score, full_recovery, candidate))
         print(
             f"[SCORE] center={candidate['center']} score={score:.3f} "
             f"yolo={breakdown.get('yolo_conf', 0):.2f} speed={breakdown.get('speed', 0):.2f} "
@@ -751,6 +758,23 @@ def select_ball_candidate_by_score(
             f"static={breakdown.get('static', 0):.2f} net={'Y' if in_net else 'N'} "
             f"gap={gap_frames} fullrec={full_recovery}"
         )
+        candidate_side = (candidate.get("game_context") or {}).get("side")
+        if (
+            reject_weak_cross_court
+            and preferred_side in ("CampoA", "CampoB")
+            and candidate_side in ("CampoA", "CampoB")
+            and candidate_side != preferred_side
+            and score < cross_court_min_score
+        ):
+            print(
+                f"[PENDING-END-REJECT] cross-court fraco: side={candidate_side} "
+                f"preferred={preferred_side} score={score:.3f} < {cross_court_min_score:.2f}"
+            )
+            continue
+        scored.append((score, full_recovery, candidate))
+
+    if not scored:
+        return None, "rejected_by_pending_end_policy", best_context_rejected, 0.0, False
 
     scored.sort(key=lambda s: s[0], reverse=True)
     top_score, top_full_recovery, top_candidate = scored[0]
@@ -759,11 +783,18 @@ def select_ball_candidate_by_score(
     recover_th = float(cfg.score_recovery_threshold)
     recover_gap = int(cfg.score_recovery_gap_frames)
 
+    if gap_frames > 0 and min_reacquire_score > 0.0 and top_score < min_reacquire_score:
+        print(
+            f"[PENDING-END-REJECT] reacquire fraco: center={top_candidate['center']} "
+            f"score={top_score:.3f} < {min_reacquire_score:.2f} (gap={gap_frames})"
+        )
+        return None, "rejected_pending_end_reacquire", best_context_rejected, top_score, False
+
     if top_score >= accept_th:
         print(f"[SCORE-ACCEPT] center={top_candidate['center']} score={top_score:.3f} >= {accept_th:.2f}")
         return top_candidate, "selected_by_score", best_context_rejected, top_score, top_full_recovery
 
-    if top_score >= recover_th and int(gap_frames) >= recover_gap:
+    if not disable_score_recovery and top_score >= recover_th and int(gap_frames) >= recover_gap:
         # Recovery: aceita com confiança degradada → marca interpolated=True
         # para que classificadores de spike/block/ace o ignorem.
         top_candidate["interpolated"] = True
@@ -998,6 +1029,7 @@ class BallTrackerCore:
         net_zone_evaluator: Optional[Callable[[Tuple[int, int]], bool]] = None,
         max_ball_speed_ms: Optional[float] = None,
         pixel_to_court_m: Optional[Callable[[Tuple[int, int]], Tuple[float, float]]] = None,
+        tracking_policy: Optional[Dict] = None,
     ) -> BallTrackResult:
         # `previous_in_net_zone` permanece para compatibilidade. O sistema de
         # scoring usa `net_zone_evaluator(center)` por candidato (boost ×1.2).
@@ -1029,6 +1061,7 @@ class BallTrackerCore:
                 candidate_evaluator=context_evaluator,
                 net_zone_evaluator=net_zone_evaluator,
                 pixel_to_court_m=pixel_to_court_m,
+                tracking_policy=tracking_policy,
             )
         )
         context_decision: Optional[Dict] = None

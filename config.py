@@ -21,14 +21,14 @@ class Config:
 
     # Time window (absolute timestamps in the video)
     # Inicio 
-    start_ts: str = "00:26:30"
+    # start_ts: str = "00:26:30"
     # 3-0 
     # start_ts: str = "00:27:20"
     # 6-2
-    # start_ts: str = "00:29:55"
+    #start_ts: str = "00:29:55"
     # start_ts: str = "00:34:25"
     # start_ts: str = "00:27:45"
-    # start_ts: str = "00:29:53"
+    start_ts: str = "00:31:42"
     end_ts: str = "00:46:17"
 
     # Models

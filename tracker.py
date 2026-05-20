@@ -178,6 +178,15 @@ class VolleyballTracker:
         self.ball_missing = 0
         self.ball_last_det: Optional[Dict] = None
         self.current_ball_det: Optional[Dict] = None
+        self.rally_tracking_policy: Dict = {
+            "phase": "ACTIVE",
+            "disable_score_recovery": False,
+            "min_reacquire_score": 0.0,
+            "reject_weak_cross_court": False,
+            "cross_court_min_score": 0.0,
+            "preferred_side": None,
+            "suppress_recovery_drawer_append": False,
+        }
         self.field_roi_polygon: Optional[np.ndarray] = self._build_field_roi_polygon()
         self.field_roi_top_y: Optional[float] = float(np.min(self.field_roi_polygon[:, 1])) if self.field_roi_polygon is not None else None
         self.ceiling_margin_px: float = 150.0
@@ -196,6 +205,22 @@ class VolleyballTracker:
         self.last_visible_ball: Optional[Dict] = None
         self.prev_ball_visible = False
         self.last_net_event_frame = -10_000
+
+    def set_rally_tracking_policy(self, policy: Optional[Dict]) -> None:
+        base_policy = {
+            "phase": "ACTIVE",
+            "disable_score_recovery": False,
+            "min_reacquire_score": 0.0,
+            "reject_weak_cross_court": False,
+            "cross_court_min_score": 0.0,
+            "preferred_side": None,
+            "suppress_recovery_drawer_append": False,
+        }
+        if isinstance(policy, dict):
+            for key, value in policy.items():
+                if key in base_policy:
+                    base_policy[key] = value
+        self.rally_tracking_policy = base_policy
 
     def _class_name(self, cls: int, res) -> str:
         names = getattr(res, "names", None)
@@ -295,6 +320,7 @@ class VolleyballTracker:
             net_zone_evaluator=net_zone_evaluator,
             max_ball_speed_ms=max_ball_speed_ms,
             pixel_to_court_m=pixel_to_court_m,
+            tracking_policy=dict(self.rally_tracking_policy),
         )
         self.last_ball_core_result = core_result
 
@@ -331,8 +357,13 @@ class VolleyballTracker:
             accepted_det["game_context_decision"] = game_context_decision
             accepted_det["ball_core_debug"] = dict(core_result.debug)
             now_t = float(timestamp_s) if timestamp_s is not None else float(time.time())
-            self._infill_ball_drawer_gap_if_needed(float(accepted_det["center"][0]), float(accepted_det["center"][1]), now_t)
-            self._append_ball_drawer(float(accepted_det["center"][0]), float(accepted_det["center"][1]), now_t)
+            is_recovery_like = bool(
+                accepted_det.get("interpolated", False) or core_result.debug.get("recovery_used", False)
+            )
+            suppress_recovery_append = bool(self.rally_tracking_policy.get("suppress_recovery_drawer_append", False))
+            if not (suppress_recovery_append and is_recovery_like):
+                self._infill_ball_drawer_gap_if_needed(float(accepted_det["center"][0]), float(accepted_det["center"][1]), now_t)
+                self._append_ball_drawer(float(accepted_det["center"][0]), float(accepted_det["center"][1]), now_t)
             self.ball_missing = 0
             self.ball_last_det = dict(accepted_det)
             self.current_ball_det = dict(accepted_det)

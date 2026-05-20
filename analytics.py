@@ -644,6 +644,17 @@ class AnalyticsEngine:
         self.block_detector: Optional[BlockDetector] = None
         self.last_block_assessment: BlockAssessment = BlockAssessment(reasons=["not_initialized"])
         self.last_structured_event: Optional[Dict] = None
+        self.RALLY_PHASE_ACTIVE: str = "ACTIVE"
+        self.RALLY_PHASE_PENDING_END: str = "PENDING_END"
+        self.rally_phase: str = self.RALLY_PHASE_ACTIVE
+        self.pending_end_since_ts: Optional[float] = None
+        self.pending_end_since_frame: Optional[int] = None
+        self.pending_end_reason: Optional[str] = None
+        self.pending_end_drawer_snapshot: Optional[List[Tuple[float, float, float]]] = None
+        self.pending_end_locked_side: Optional[str] = None
+        self.pending_end_cancel_streak: int = 0
+        self.pending_end_cancel_frames: int = int(getattr(config, "rally_pending_end_cancel_frames", 2))
+        self.pending_end_block_confidence: float = float(getattr(config, "rally_pending_end_block_confidence", 0.78))
         self.RALLY_STATE_ACTIVE: str = "ACTIVE"
         self.RALLY_ENDED_VISUAL: str = "RALLY_ENDED_VISUAL"
         self.RALLY_CONFIRMED_OCR: str = "RALLY_CONFIRMED_OCR"
@@ -688,6 +699,9 @@ class AnalyticsEngine:
                 "reference_score": self.prev_score,
                 "pending_score_change": self.pending_score_change,
                 "pending_score_change_ts": self.pending_score_change_ts,
+                "rally_phase": self.rally_phase,
+                "pending_end_reason": self.pending_end_reason,
+                "pending_end_since_ts": self.pending_end_since_ts,
                 "score_just_updated": self.score_just_updated,
             }
         )
@@ -712,6 +726,118 @@ class AnalyticsEngine:
         counts = self.event_store.category_counts()
         counts["rallies"] = int(self.rally_counter)
         return counts
+
+    def _tracking_policy(self) -> Dict:
+        pending_end = self.rally_phase == self.RALLY_PHASE_PENDING_END
+        return {
+            "phase": self.rally_phase,
+            "disable_score_recovery": bool(pending_end),
+            "min_reacquire_score": 0.68 if pending_end else 0.0,
+            "reject_weak_cross_court": bool(pending_end),
+            "cross_court_min_score": 0.78 if pending_end else 0.0,
+            "preferred_side": self.pending_end_locked_side if pending_end else None,
+            "suppress_recovery_drawer_append": bool(pending_end),
+        }
+
+    def _push_tracking_policy(self, tracker) -> None:
+        if hasattr(tracker, "set_rally_tracking_policy"):
+            tracker.set_rally_tracking_policy(self._tracking_policy())
+
+    def _is_strong_block_pending_end(self) -> bool:
+        assessment = self.last_block_assessment
+        state = str(getattr(assessment, "state", "") or "")
+        if state == "confirmed_block":
+            return True
+        if state != "block_candidate":
+            return False
+        signals = dict(getattr(assessment, "signals", {}) or {})
+        return bool(
+            float(getattr(assessment, "attack_confidence", 0.0) or 0.0) >= self.pending_end_block_confidence
+            and bool(signals.get("approach_detected", False))
+            and bool(signals.get("net_contact", False))
+            and bool(signals.get("trajectory_reversed", False))
+            and bool(signals.get("same_side_return", signals.get("block_candidate", False)))
+        )
+
+    def _pending_end_reasons(self, game_context: Optional[Dict]) -> List[str]:
+        reasons: List[str] = []
+        if self.visual_end_state == self.RALLY_ENDED_VISUAL:
+            reasons.append("visual_end")
+        if isinstance(game_context, dict) and bool(game_context.get("rally_end_candidate", False)):
+            reasons.append("rules_rally_end_candidate")
+        if self._is_strong_block_pending_end():
+            reasons.append(f"block:{self.last_block_assessment.state}")
+        return reasons
+
+    def _ball_detection_is_recovery_like(self, tracker) -> bool:
+        det = getattr(tracker, "current_ball_det", None)
+        if not isinstance(det, dict):
+            return False
+        return bool(det.get("interpolated", False) or det.get("recovery_used", False))
+
+    def _should_cancel_pending_end(
+        self,
+        ball_state,
+        tracker,
+        game_context: Optional[Dict],
+    ) -> bool:
+        if self.pending_score_change is not None:
+            return False
+        if self._pending_end_reasons(game_context):
+            return False
+        if not bool(getattr(ball_state, "visible", False)):
+            return False
+        if str(getattr(ball_state, "track_state", "")).lower() != "observed":
+            return False
+        if isinstance(game_context, dict) and not bool(game_context.get("ball_accepted_for_stats", True)):
+            return False
+        if self._ball_detection_is_recovery_like(tracker):
+            return False
+        return True
+
+    def _enter_pending_end(
+        self,
+        tracker,
+        timestamp_s: float,
+        frame_idx: int,
+        reason: str,
+    ) -> None:
+        if self.rally_phase == self.RALLY_PHASE_PENDING_END:
+            self.pending_end_cancel_streak = 0
+            if not self.pending_end_drawer_snapshot:
+                self.pending_end_drawer_snapshot = self._ordered_ball_drawer()
+            self._push_tracking_policy(tracker)
+            return
+        self.rally_phase = self.RALLY_PHASE_PENDING_END
+        self.pending_end_since_ts = float(timestamp_s)
+        self.pending_end_since_frame = int(frame_idx)
+        self.pending_end_reason = str(reason)
+        self.pending_end_drawer_snapshot = self._ordered_ball_drawer()
+        self.pending_end_locked_side = self.current_side
+        self.pending_end_cancel_streak = 0
+        self._push_tracking_policy(tracker)
+
+    def _cancel_pending_end(self, tracker, reason: str = "continuity_restored") -> None:
+        if self.rally_phase != self.RALLY_PHASE_PENDING_END:
+            return
+        self.rally_phase = self.RALLY_PHASE_ACTIVE
+        self.pending_end_since_ts = None
+        self.pending_end_since_frame = None
+        self.pending_end_reason = None
+        self.pending_end_drawer_snapshot = None
+        self.pending_end_locked_side = None
+        self.pending_end_cancel_streak = 0
+        self._push_tracking_policy(tracker)
+
+    def _clear_pending_end(self, tracker) -> None:
+        self.rally_phase = self.RALLY_PHASE_ACTIVE
+        self.pending_end_since_ts = None
+        self.pending_end_since_frame = None
+        self.pending_end_reason = None
+        self.pending_end_drawer_snapshot = None
+        self.pending_end_locked_side = None
+        self.pending_end_cancel_streak = 0
+        self._push_tracking_policy(tracker)
 
     def _current_possession_side(
         self,
@@ -1639,6 +1765,7 @@ class AnalyticsEngine:
         self.tocou_rede = False
         self.toucou_rede = False
         self.point_finalized = False
+        self._clear_pending_end(tracker)
         self.pending_score_drawer_snapshot = None
         self.pending_score_prev_base = None
         self.pending_score_forced = False
@@ -2719,6 +2846,27 @@ class AnalyticsEngine:
         self.prev_ball_visible = bool(ball_state.visible)
         self.prev_visible_in_block_zone = in_block_zone
 
+        pending_end_reasons = self._pending_end_reasons(game_context)
+        if (
+            self.point_started
+            and not self.rally_closed_by_scoreboard
+            and self.pending_score_change is None
+            and pending_end_reasons
+        ):
+            self._enter_pending_end(
+                tracker=tracker,
+                timestamp_s=timestamp_s,
+                frame_idx=frame_idx,
+                reason="|".join(pending_end_reasons),
+            )
+        elif self.rally_phase == self.RALLY_PHASE_PENDING_END:
+            if self._should_cancel_pending_end(ball_state=ball_state, tracker=tracker, game_context=game_context):
+                self.pending_end_cancel_streak += 1
+                if self.pending_end_cancel_streak >= self.pending_end_cancel_frames:
+                    self._cancel_pending_end(tracker=tracker)
+            else:
+                self.pending_end_cancel_streak = 0
+
         if frame_idx % config.ocr_every_n_frames == 0 and self.pending_score_change is None:
             score_stable = self.ocr.read(scoreboard_read_frame, frame_idx=frame_idx, timestamp_s=timestamp_s)
             score_raw = getattr(self.ocr, "last_raw_score", None)
@@ -2797,7 +2945,9 @@ class AnalyticsEngine:
                             self.pending_score_prev_base = self.prev_score
                             self.pending_score_change = accepted_score
                             self.pending_score_change_ts = timestamp_s
-                            self.pending_score_drawer_snapshot = self._ordered_ball_drawer()
+                            self.pending_score_drawer_snapshot = self._ordered_drawer_copy(self.pending_end_drawer_snapshot)
+                            if not self.pending_score_drawer_snapshot:
+                                self.pending_score_drawer_snapshot = self._ordered_ball_drawer()
                             self.pending_score_forced = False
                             self.invalid_ocr_candidate = None
                             self.tentativas_ocr = 0
@@ -2839,7 +2989,9 @@ class AnalyticsEngine:
             if self.rally_mgr.active is None:
                 self.rally_mgr.start_if_needed(True, timestamp_s, frame_idx, tracker.trail_points())
 
-            analysis_drawer = self._ordered_drawer_copy(self.pending_score_drawer_snapshot)
+            analysis_drawer = self._ordered_drawer_copy(self.pending_end_drawer_snapshot)
+            if not analysis_drawer:
+                analysis_drawer = self._ordered_drawer_copy(self.pending_score_drawer_snapshot)
             if not analysis_drawer:
                 analysis_drawer = self._ordered_ball_drawer()
             speed_peak, speed_mean = self._speed_metrics_from_drawer(analysis_drawer)
