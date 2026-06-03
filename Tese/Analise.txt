@@ -1,0 +1,72 @@
+1-0 indefinido certo
+2-0 spike/ataque certo
+3-0 bloco certo
+4-0 bloco errado (ataque lento)
+4-1 indefinido certo
+5-1 bloco errado (ataque lento)
+6-1 spike/ataque certo
+6-2 ball ou net errado  (spike certo) ver este
+7-2 spike/ataque certo (lento)
+7-3 indefinido certo
+8-3 indefinido certo
+9-3 indefinido errado (spike) 
+9-4 indefinido certo
+9-5 indefinido certo
+10-5 indefinido certo
+11-5 indefinido certo
+12-5 indefinido certo
+13-5 spike/ataque certo
+
+Corrigir:
+Acho que quando o ataque vai lento ele confunde com um bloco, não percebo pq
+adicionar bola para fora em vez de indefinido
+ver ponto 6-2
+
+
+-----------------------------
+
+
+ok eu estive a analisar ponto a ponto e ainda nao está bem a logica do meu codigo vamos la ver.
+Aqui está a analise que fiz:
+1-0 indefinido certo
+2-0 spike/ataque certo
+3-0 bloco certo
+4-0 bloco errado (ataque lento)
+4-1 indefinido certo
+5-1 bloco errado (ataque lento)
+6-1 spike/ataque certo
+6-2 ball ou net errado  (spike certo) ver este
+7-2 spike/ataque certo (lento)
+7-3 indefinido certo
+8-3 indefinido certo
+9-3 indefinido errado (spike) 
+9-4 indefinido certo
+9-5 indefinido certo
+10-5 indefinido certo
+11-5 indefinido certo
+12-5 indefinido certo
+13-5 spike/ataque certo
+
+Corrigir:
+Acho que quando o ataque vai lento ele confunde com um bloco, não percebo pq
+adicionar bola para fora em vez de indefinido
+Ponto 6-2 é capaz de ter sido o melhor spike mas ele nao captou.
+
+Com isto oq tem de ser melhorado é, corrigir porque ás vezes um ataque simples para o outro campo é confundido como um bloco (Algo impossivel de acontecer, porque a bola está a ser bem detetada e nao pode de acontecer isto), ás vezes ataques mais lentos conta como spike/ataque e às vezes como indefinido ( quero separar isto ja aqui, spike é isto Consiste num golpe poderoso realizado no ar, onde o jogador salta e bate na bola com a palma da mão, direcionando-a rapidamente para baixo em direção à quadra adversária, já um ataque é mais geral, O ataque no voleibol é o fundamento ofensivo principal, geralmente o terceiro toque, que visa fazer a bola tocar na quadra adversária ou ser desviada para fora, e para acabar para ja quero adicionar um bola para fora, porque está a haver muitos indefinidos e acho mau isso para apresentar na tese, bola para fora consiste simplesmente quando a equipa com bola ataca e a bola vai diretamente para fora marcando ponto para a outra equipa ( neste caso quero que identifiques se foi bola para fora principalmente na marcação do ponto, sabemos a equipa que estava com posse e se faz a bola passar para o outro lado indo para fora o ponto vai ser da outra equipa.)
+
+Percebeste tudo ? Ou tens mais alguma pergunta antes de implementar?
+
+
+--------------------------------------
+
+
+Confundia Ace com um Bloco pois a bola partiu de quem serviu e a outra equipa recebeu, atacou mas a equipa que serviu fez bloco, com isso ele confundiu o ace com bloco.
+
+Ponto 3-0 não percebo
+Durante o ponto a posse aparece sempre bem onde está a bola porem no final classifica assim:
+[BLOCK-OVERRIDE] confirmed_block anulado: vencedor=TeamA é o atacante (TeamA)
+[FINAL] Posse=CampoB | Atacante=TeamA | Bloqueio=TeamB | Origem: CampoA | Fim: CampoB | BlockState: na | Cruzou: True | Vmax: 132.42 | Razao: na -> RESULTADO: ACE.
+[BLOCK-DETAIL] APPROACH=False | NET_CONTACT=False | REVERSAL=False | ORIGIN=CampoA | END=CampoB | POSSESSION=TeamA | BLOCK=False | ATTACK_INFERRED=False      
+[BLOCK-METRICS] APPROACH_GAIN=None | TOWARDS=None | MIN_NET_DIST=None | NET_HITS=None | REVERSAL_REASON=None | ATTACK_INFER_REASON=None
+[BLOCK-GAP] GAP_NEAR_NET=False | GAP_FRAMES=None | BEFORE_GAP=None | AFTER_GAP=None | BLOCK_FROM_GAP=False
+[POSSE] Bola no CampoB | Fim da Seta: CampoB

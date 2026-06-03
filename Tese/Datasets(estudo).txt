@@ -1,0 +1,90 @@
+📌 Dataset que EU escolheria (sem hesitar)
+✅ SportsMOT Dataset (como dataset base)
+
+🔗 https://github.com/MCG-NJU/SportsMOT
+
+🧠 Porquê esta escolha (argumento forte):
+
+1️⃣ É recente (ICCV 2023)
+→ Mostra que estás alinhado com o estado-da-arte, não com datasets antigos.
+
+2️⃣ É feito para tracking multi-alvo
+
+Bounding boxes
+IDs persistentes
+Formato MOT (standard académico)
+
+👉 Isto encaixa perfeitamente no teu objetivo:
+
+deteção → tracking → estatísticas
+
+3️⃣ É genérico mas realista
+
+Vários desportos coletivos
+Cenários complexos
+O que funciona aqui funciona no voleibol
+
+4️⃣ É defensável
+“Mas isto não é voleibol…”
+Tu respondes:
+“É um dataset de referência para tracking desportivo, que permite validar o pipeline. O voleibol entra como caso de aplicação.”
+
+-----------------------------------------------------------------------
+
+Pipeline conceptual (SEM código)
+
+Vídeo → Deteção (jogadores/bola)
+      → Tracking
+      → Extração de métricas
+      → Estatísticas de desempenho
+
+-----------------------------------------------------------------------
+
+🥇 Métrica 1 — Deslocamento total por jogador
+O que é:
+
+Distância total percorrida durante um rally ou set
+
+Porque é excelente:
+
+Sai diretamente do tracking
+É usada em análise de desempenho real
+Fácil de explicar e validar
+
+👉 Frase para o professor:
+
+“Permite quantificar o esforço físico e a participação dos jogadores.”
+
+🥈 Métrica 2 — Ocupação espacial do campo
+O que é:
+
+Zonas do campo mais ocupadas por jogador / equipa
+Mapas de calor
+
+Porque é muito forte:
+
+Visual
+Tático
+Muito valorizado por treinadores
+
+👉 Frase perfeita:
+
+“Permite analisar posicionamento defensivo e ofensivo ao longo do jogo.”
+
+🥉 Métrica 3 — Duração e dinâmica dos rallies
+O que é:
+
+Tempo médio de cada rally
+Ritmo do jogo
+
+Porque é segura:
+
+Não depende de reconhecimento de ações complexas
+Dá estatísticas reais e úteis
+Fácil de validar
+
+👉 Frase:
+
+“Caracteriza a intensidade e o ritmo do jogo.”
+
+Para validação do pipeline, escolhi o SportsMOT por ser um benchmark recente de tracking desportivo. A partir do tracking, vou extrair métricas simples mas relevantes, como deslocamento dos jogadores, ocupação espacial do campo e duração dos rallies. O voleibol entra como caso de aplicação e motivação do problema.

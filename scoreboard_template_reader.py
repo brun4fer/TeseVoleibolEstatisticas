@@ -66,6 +66,13 @@ class MatchCandidate:
     h: int
 
 
+@dataclass(frozen=True)
+class DigitMatch:
+    value: int
+    score: float
+    parts: int
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Read a volleyball scoreboard using template matching."
@@ -402,7 +409,7 @@ def match_digits_by_components(
     templates: Dict[int, np.ndarray],
     allowed_digits: Tuple[int, ...] | None = None,
     max_digits: int = 2,
-) -> tuple[int, float] | None:
+) -> DigitMatch | None:
     components = extract_digit_components(binary, max_digits=max_digits)
     if not components:
         return None
@@ -432,7 +439,11 @@ def match_digits_by_components(
     if not digits:
         return None
 
-    return int("".join(digits)), float(np.mean(scores))
+    return DigitMatch(
+        value=int("".join(digits)),
+        score=float(np.mean(scores)),
+        parts=len(components),
+    )
 
 
 def normalize_strip_for_matching(
@@ -571,10 +582,10 @@ def match_digits(
     nms_iou_threshold: float = DEFAULT_NMS_IOU_THRESHOLD,
     x_group_distance: int = DEFAULT_X_GROUP_DISTANCE,
     max_digits: int = 2,
-) -> tuple[int, float]:
+) -> DigitMatch:
     processed_std = float(np.std(processed))
     if processed_std < 1e-6:
-        return 0, -1.0
+        return DigitMatch(value=0, score=-1.0, parts=0)
 
     digit_pool = allowed_digits if allowed_digits is not None else tuple(sorted(templates.keys()))
     candidates: list[MatchCandidate] = []
@@ -620,7 +631,7 @@ def match_digits(
     if not candidates and fallback_best is not None:
         candidates = [fallback_best]
     if not candidates:
-        return 0, -1.0
+        return DigitMatch(value=0, score=-1.0, parts=0)
 
     filtered = _nms_and_group_by_x(
         candidates=candidates,
@@ -630,7 +641,7 @@ def match_digits(
     if not filtered and fallback_best is not None:
         filtered = [fallback_best]
     if not filtered:
-        return 0, -1.0
+        return DigitMatch(value=0, score=-1.0, parts=0)
 
     if max_digits > 0 and len(filtered) > max_digits:
         filtered = sorted(filtered, key=lambda c: c.score, reverse=True)[:max_digits]
@@ -639,7 +650,7 @@ def match_digits(
     digits_as_text = "".join(str(candidate.digit) for candidate in filtered)
     value = int(digits_as_text) if digits_as_text else 0
     score = float(np.mean([candidate.score for candidate in filtered]))
-    return value, score
+    return DigitMatch(value=value, score=score, parts=len(filtered))
 
 
 def read_scoreboard_roi(
@@ -676,17 +687,25 @@ def read_scoreboard_roi(
             allowed_digits=ALLOWED_DIGITS_BY_REGION.get(spec.name),
             max_digits=max_digits,
         )
-        strip_digit, strip_score = match_digits(
+        strip_match = match_digits(
             processed,
             templates,
             allowed_digits=ALLOWED_DIGITS_BY_REGION.get(spec.name),
             match_threshold=float(MATCH_THRESHOLD_BY_REGION.get(spec.name, DEFAULT_MATCH_THRESHOLD)),
             max_digits=max_digits,
         )
-        if component_match is not None:
-            digit, score = component_match
+        if component_match is None:
+            digit, score = strip_match.value, strip_match.score
+        elif strip_match.parts != component_match.parts:
+            # When one path sees more digit parts than the other, trust the
+            # more granular segmentation. This avoids collapsing 10+ scores
+            # into a single "1" when the blob-based path merges both digits.
+            chosen = strip_match if strip_match.parts > component_match.parts else component_match
+            digit, score = chosen.value, chosen.score
+        elif strip_match.score > component_match.score:
+            digit, score = strip_match.value, strip_match.score
         else:
-            digit, score = strip_digit, strip_score
+            digit, score = component_match.value, component_match.score
         results[spec.name] = digit
         debug_info[spec.name] = (cropped_digit, processed, score)
         total_score += score

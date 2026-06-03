@@ -1,0 +1,44 @@
+1. Transição do Placar para a Deteção da Bola
+Após a conclusão do sistema de OCR para o placar, o foco mudou para o maior desafio técnico: a deteção estável da bola.
+
+O Problema: A bola é pequena, move-se a alta velocidade (motion blur) e o pavilhão "Nave Ilídio Ramos" apresenta distrações visuais, como luzes fortes e murais decorativos.
+
+2. Otimização do Tracker e Heurísticas
+Inicialmente, tentámos otimizar o modelo genérico YOLOv8s com lógica matemática:
+
+Escolha: Utilização de imgsz=1280.
+
+Porquê: Para manter píxeis suficientes de um objeto pequeno (bola) em frames de grande angular.
+
+Escolha: Implementação de Filtros de Kalman e predição por vetor de velocidade.
+
+Porquê: Para manter o rastreio da bola mesmo quando ela é "perdida" por um frame devido a oclusão ou reflexos.
+
+Escolha: Filtros de Área e Homografia.
+
+Porquê: Para eliminar falsos positivos (como cabeças de jogadores ou luzes) que aparecem fora dos limites do campo ou com dimensões irreais.
+
+3. Diagnóstico e Mudança para Fine-Tuning
+Apesar das heurísticas, o modelo genérico confundia elementos do mural da parede com a bola.
+
+Escolha: Criação de um dataset personalizado e treino de um modelo especializado (best.pt).
+
+Porquê: Um modelo genérico (COCO dataset) não conhece a textura específica da bola oficial de voleibol nem as condições de luz daquele pavilhão. O treino focado numa única classe ("ball") aumenta drasticamente a precisão.
+
+Escolha: Inclusão de Imagens de Background (fotos do mural sem bola).
+
+Porquê: Ensinar especificamente ao modelo que o mural não é a bola, reduzindo os erros de deteção estática.
+
+4. Ajustes de Hardware (GTX 1650)
+Durante o treino, encontrámos limitações de memória e erros de sistema (WinError 1455).
+
+Escolha: Redução do batch para 2, desativação do amp e configuração de workers=0.
+
+Porquê: Para evitar o estouro da VRAM da tua placa gráfica e contornar falhas na gestão de memória virtual do Windows durante o treino.
+
+5. Estado Atual e Resultados
+Dataset: Expandido de 5 para 43 imagens anotadas, cobrindo diversas situações de jogo.
+
+Performance: O treino final resultou num mAP50 de 0.995, indicando que, para o conjunto de dados atual, o modelo é extremamente preciso.
+
+Integração: O novo "cérebro" (best.pt) já está integrado no tracker.py, permitindo agora o início da validação real das estatísticas de Spikes e Blocks.

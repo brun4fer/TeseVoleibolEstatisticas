@@ -1,0 +1,282 @@
+Resumo do desenvolvimento recente do sistema de análise automática de estatísticas de voleibol
+
+Nos últimos dias foi desenvolvido e refinado o sistema responsável por detetar automaticamente o resultado dos rallies e classificar eventos técnicos, como spike e block, a partir de vídeo. O sistema baseia-se na combinação de três componentes principais: deteção da bola, leitura automática do placar (OCR) e análise da trajetória da bola relativamente à rede e aos campos.
+
+Durante o desenvolvimento surgiram várias dificuldades, principalmente relacionadas com a leitura automática do placar, que obrigaram à criação de diferentes abordagens e mecanismos de robustez.
+
+Estrutura geral da lógica do sistema
+
+O sistema segue o seguinte fluxo geral:
+
+Calibração inicial do campo
+
+O utilizador seleciona:
+
+4 cantos do campo
+
+2 pontos da rede
+
+Estes pontos permitem calcular:
+
+limites dos dois campos
+
+posição da rede
+
+referência espacial para analisar a trajetória da bola.
+
+Identificação da região do placar
+
+Inicialmente o utilizador seleciona manualmente a zona do placar.
+
+Essa região é utilizada para realizar OCR dos números do resultado.
+
+Tracking da bola
+
+O sistema segue a posição da bola ao longo dos frames.
+
+Cada posição é armazenada numa gaveta (buffer) de frames da bola.
+
+Deteção do fim do rally
+
+O rally termina quando:
+
+o placar muda
+
+ou a trajetória indica final do ponto.
+
+Classificação da jogada
+
+Quando o placar muda, o sistema analisa a trajetória da bola armazenada na gaveta e classifica o tipo de ação técnica.
+
+Exemplo de output do sistema:
+
+[OCR-VALID] Mudança +1 confirmada: (0, 4, 0, 2) -> (0, 5, 0, 2)
+[STAS-VALID] Placar mudou. Frames na gaveta: 6. Contando rali e verificando estatística técnica...
+[FINAL] Origem: CampoB | Fim: CampoB | Rede: True | Cruzou: False | Vmax: 137.96 -> RESULTADO: BLOCK.
+[POSSE] Bola no CampoB | Fim da Seta: CampoB
+[SERVICE-RESET] Origem: OCR | Gaveta e estado reiniciados.
+Classificação de eventos técnicos (Spike e Block)
+
+A classificação das jogadas baseia-se principalmente em três fatores:
+
+1. Origem da bola
+
+O sistema identifica em que campo começou o ataque:
+
+Origem: CampoA ou CampoB
+2. Cruzamento da rede
+
+O sistema verifica se a bola cruzou a rede:
+
+Rede: True / False
+3. Campo onde a bola termina
+Fim: CampoA ou CampoB
+Lógica para identificar Block
+
+Um block é identificado quando:
+
+a bola parte de um campo
+
+atinge a rede ou é bloqueada
+
+e regressa ao mesmo campo sem cruzar para o adversário
+
+Exemplo:
+
+Origem: CampoB
+Fim: CampoB
+Rede: True
+Cruzou: False
+
+Resultado:
+
+BLOCK
+Lógica para identificar Spike
+
+Um spike é identificado quando:
+
+a bola parte de um campo
+
+cruza a rede
+
+termina no campo adversário
+
+Exemplo lógico:
+
+Origem: CampoA
+Fim: CampoB
+Rede: True
+Cruzou: True
+
+Resultado:
+
+SPIKE
+Identificação da posse de bola
+
+O sistema mantém também a posse de bola:
+
+[POSSE] Bola no CampoB
+
+Esta informação ajuda a interpretar corretamente quem iniciou o ataque e quem ganhou o ponto.
+
+Principais dificuldades encontradas
+
+A maior dificuldade encontrada durante o desenvolvimento foi a leitura correta do placar através de OCR.
+
+Apesar de os números serem relativamente simples (números brancos em fundo escuro), a leitura mostrou-se inconsistente devido a:
+
+compressão do vídeo
+
+variação de iluminação
+
+pequenas mudanças na posição da câmara
+
+resolução variável dos dígitos
+
+Abordagens testadas para melhorar o OCR
+
+Foram testadas várias estratégias para melhorar a leitura do placar.
+
+1. Template Matching
+
+Primeira abordagem:
+
+recorte dos dígitos
+
+comparação com imagens de referência
+
+Problemas encontrados:
+
+variação no tamanho dos dígitos
+
+baixa robustez a ruído
+
+Resultado: precisão insuficiente
+
+2. Normalização das imagens
+
+Tentou-se:
+
+redimensionamento
+
+threshold adaptativo
+
+inversão de cores
+
+Apesar de alguma melhoria, o OCR continuava a falhar frequentemente.
+
+3. CNN para reconhecimento de dígitos
+
+Foi criado um dataset de dígitos extraídos do vídeo e treinada uma pequena rede neuronal convolucional (CNN).
+
+O modelo apresentou boa precisão em teste isolado, mas no pipeline completo surgiram problemas:
+
+deteção incorreta da região do dígito
+
+cortes incompletos
+
+variação no posicionamento
+
+Resultado: melhoria limitada no sistema real.
+
+Problema principal observado
+
+O OCR frequentemente lia números incorretos, por exemplo:
+
+Placar real: 5-2
+OCR lê:      5-0
+
+Isto cria um problema porque:
+
+5-2 -> 5-0
+
+é uma mudança impossível no voleibol.
+
+No voleibol, o placar apenas pode mudar de:
+
+A-B -> A+1-B
+ou
+A-B -> A-B+1
+Lógica de validação do placar
+
+Para resolver este problema foi implementada uma lógica baseada nas regras do voleibol.
+
+O sistema verifica se a mudança é válida:
+
+5-2 -> 6-2
+ou
+5-2 -> 5-3
+
+Se não for válida, a leitura é considerada ruído OCR.
+
+Exemplo:
+
+[OCR-NOISE] Leitura inferior ignorada: oficial=(0, 5, 0, 2) OCR=(0, 4, 0, 2)
+Estratégia de confirmação da mudança de placar
+
+Para lidar com erros persistentes de OCR foi implementado um sistema de confirmação:
+
+O sistema tenta ler o placar várias vezes consecutivas.
+
+Se durante 5 leituras consecutivas o OCR indicar um valor diferente, assume-se que o placar mudou.
+
+Exemplo:
+
+Placar oficial: 5-2
+OCR lê: 5-0
+
+Após várias leituras iguais:
+
+5-0
+5-0
+5-0
+5-0
+5-0
+
+O sistema conclui que houve mudança e aplica a regra do voleibol:
+
+5-2 -> 5-3
+Correção temporária do OCR (digit locking)
+
+Depois de assumir a mudança, o sistema cria uma associação temporária:
+
+0 -> 3
+
+Ou seja:
+
+OCR_RAW: 5-0
+OCR_CORRIGIDO: 5-3
+
+Durante o rally, sempre que o OCR lê 0, o sistema interpreta como 3.
+
+Este mecanismo permanece ativo até que o placar mude novamente.
+
+Quando ocorre nova mudança válida, a associação é reiniciada.
+
+Resultado da estratégia
+
+Esta abordagem permitiu:
+
+evitar loops de incremento do placar
+
+manter a contagem correta dos pontos
+
+garantir que cada mudança de placar corresponde ao fim de um rally
+
+Além disso, permitiu ao sistema continuar a calcular corretamente as estatísticas técnicas, mesmo quando o OCR não conseguia ler corretamente os números.
+
+Conclusão
+
+Apesar das dificuldades associadas à leitura automática do placar, foi possível desenvolver uma lógica robusta baseada nas regras do voleibol e na análise temporal das leituras OCR.
+
+A combinação de:
+
+validação de mudanças possíveis
+
+confirmação por múltiplas leituras
+
+correção temporária de dígitos
+
+análise da trajetória da bola
+
+permitiu criar um sistema capaz de identificar automaticamente o fim de rallies e classificar eventos técnicos como spike e block a partir de vídeo.

@@ -1,0 +1,55 @@
+| Score inicial | Evento       | Ponto para   | Observações           |
+| ------------- | ------------ | ------------ | --------------------- |
+| 0-0           | ataque       | AA Espinho   | certo                 |
+| 1-0           | ataque       | AA Espinho   | certo                 |
+| 2-0           | bloco        | AA Espinho   | certo                 |
+| 3-0           | ataque       | AA Espinho   | certo                 |
+| 4-0           | bola fora    | Clube Kairós | certo                 |
+| 4-1           | ataque       | AA Espinho   | certo                 |
+| 5-1           | ataque       | AA Espinho   | certo                 |
+| 6-1           | ataque       | Clube Kairós | certo                 |
+| 6-2           | bola fora    | AA Espinho   | errado (muito rápido) |
+| 7-2           | ataque       | AA Espinho   | certo                 |
+| 7-3           | ataque       | AA Espinho   | certo                 |
+| 8-3           | bola na rede | AA Espinho   | certo                 |
+| 9-3           | ataque       | AA Espinho   | certo                 |
+| 9-4           | bola fora    | Clube Kairós | certo                 |
+| 9-5           | bola fora    | Clube Kairós | certo                 |
+| 10-5          | ataque       | AA Espinho   | certo                 |
+| 11-5          | bola fora    | AA Espinho   | errado                |
+| 12-5          | bola fora    | AA Espinho   | errado                |
+| 13-5          | ataque       | AA Espinho   | certo                 |
+| 13-6          | ataque       | Clube Kairós | errado (muito rápido) |
+| 14-6          | bola fora    | AA Espinho   | certo                 |
+| 14-7          | ataque       | Clube Kairós | certo                 |
+| 14-8          | ataque       | Clube Kairós | debatível             |
+| 15-8          | bola fora    | AA Espinho   | certo                 |
+| 15-9          | bola fora    | Clube Kairós | certo                 |
+| 16-9          | bola fora    | AA Espinho   | certo                 |
+| 16-10         | ataque       | Clube Kairós | certo                 |
+| 17-10         | ataque       | AA Espinho   | errado (ver)          |
+| 17-11         | ataque       | Clube Kairós | certo                 |
+| 18-11         | bola fora    | AA Espinho   | certo                 |
+| 19-11         | ataque       | AA Espinho   | certo                 |
+| 19-12         | bola na rede | Clube Kairós | certo                 |
+| 20-12         | bola fora    | AA Espinho   | errado (muito rápido) |
+| 20-13         | ataque       | Clube Kairós | certo                 |
+| 21-13         | bloco        | AA Espinho   | certo                 |
+| 21-14         | ataque       | Clube Kairós | debatível             |
+| 22-14         | bola na rede | AA Espinho   | certo                 |
+| 22-15         | ataque       | Clube Kairós | debatível             |
+| 23-15         | bola fora    | AA Espinho   | certo                 |
+| 23-16         | ataque       | Clube Kairós | errado (bolas atrapalharam)
+| 24-16         | ataque       | AA Espinho   | certo                 |
+| 24-17         | bola fora    | Clube Kairós | errado                |
+| 24-18         | bola fora    | Clube Kairós | certo                 |
+| 25-18         | bola fora    | AA Espinho   | certo                 |
+
+
+
+Está a contar bem ataques, blocos e bolas fora, porém estou com um problema de que quando o ponto acaba ainda há um intervalo até à mudança de placar, que é a minha validação de estatística, e às vezes deteta a outra bola e confunde o programa.
+
+fazer tabela com pontos iniciais da equipa A/B (como começa o resultado), como foi terminado o ponto, quem fez o ponto
+2.1 ter trabalhos relacionados
+rever ponto 2 a fundo
+

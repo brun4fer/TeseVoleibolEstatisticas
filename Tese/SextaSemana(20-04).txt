@@ -1,0 +1,224 @@
+🧠 Resumo das Últimas 3 Semanas – Sistema de Análise de Voleibol
+🎯 Objetivo Geral
+
+Desenvolver um sistema automático capaz de:
+
+detetar a bola em vídeo
+seguir a sua trajetória
+interpretar eventos de jogo
+extrair estatísticas (rallies, spikes, blocos, etc.)
+⚙️ 1. Melhoria da Deteção da Bola (Core do Sistema)
+✔️ Evolução
+Começaste com deteção frame a frame com YOLO
+Tinhas falsos positivos (parede, chão, etc.)
+A bola era mal seguida em certos momentos
+🔧 O que fizeste
+Adicionaste filtros temporais
+continuidade da trajetória
+rejeição de saltos irreais (MAX_SPEED)
+Implementaste tracking baseado em centros
+Criaste trajetória visual (trail)
+🧠 Resultado
+
+👉 Sistema passou de “deteção instável” → para tracking consistente da bola
+
+🎥 2. Treino do Modelo YOLO (Custom Dataset)
+✔️ Dataset
+~357 imagens anotadas manualmente (CVAT)
+Organização em:
+dataset/images/train
+dataset/labels/train
+🔧 O que fizeste
+Script para evitar overwrite de imagens
+Treino com YOLOv8 (Ultralytics)
+Criação de split:
+treino (~80%)
+validação (~20%)
+📊 Métricas
+mAP50 chegou ~0.88–0.89
+precisão e recall bons para objeto pequeno
+🧠 Resultado
+
+👉 Detetor passou a reconhecer muito melhor a bola (especialmente no ar)
+
+🧪 3. Filtros Avançados (Tracking Inteligente)
+🔧 Implementações
+Background subtraction (MOG2)
+usado como sinal auxiliar
+Foreground validation
+rejeitar deteções sem movimento
+Score combinado
+confiança YOLO + movimento + trajetória
+🧠 Resultado
+
+👉 Redução de falsos positivos (parede/chão)
+
+🔗 4. Integração no Sistema Principal (main.py)
+✔️ Antes
+tracking no test_ball_detection.py
+pipeline principal separado
+🔧 O que fizeste
+integraste tracking robusto no main.py
+corrigiste:
+atraso da bola (Kalman vs centro real)
+trajetória mal desenhada
+passaste a usar:
+centros aceites (não previstos)
+🧠 Resultado
+
+👉 Sistema principal passou a usar tracking correto da bola
+
+📊 5. Leitura do Placar (Scoreboard OCR)
+✔️ Problemas
+leituras erradas (ex: 3 → 8)
+ruído de texto por cima
+🔧 Soluções
+introduziste:
+validação temporal
+confirmação por múltiplos frames
+removeste dependência de leitura única
+criaste:
+raw_score
+confirmed_score
+🧠 Resultado
+
+👉 OCR ficou muito mais estável e confiável
+
+🧠 6. Lógica de Estatísticas (Rallies, Eventos)
+✔️ Já tinhas
+deteção de:
+rallies
+spikes
+alguns eventos básicos
+🔧 Melhorias
+integração com:
+tracking melhor
+OCR mais estável
+correção de:
+resets de rally
+dependência de frames isolados
+🧠 Resultado
+
+👉 Base sólida para estatísticas automáticas
+
+🧱 7. Problema Principal Atual – Deteção de BLOCO
+❌ Problema inicial
+sistema não identificava blocos
+dependência de:
+attack_pattern
+erro:
+Atacante=None
+no_attack_pattern
+🔍 Diagnóstico feito
+
+Descobriste que:
+
+👉 o sistema falhava porque:
+
+não detetava ataque
+então nem tentava bloco
+🔧 Melhorias implementadas
+removeste dependência rígida de ataque
+introduziste:
+fallback de atacante
+lógica baseada em trajetória
+usaste:
+dist_to_net
+signed_distance_to_net
+approach_gain
+❗ Problema atual (descoberta importante)
+
+Com logs reais viste:
+
+APPROACH=False
+NET_CONTACT=False
+REVERSAL=False
+💥 8. GRANDE DESCOBERTA (CRÍTICA)
+
+👉 O sistema perde a bola no momento do bloco
+
+Exemplo:
+
+[INFILL] Gap de 7 frames junto a rede
+🧠 Interpretação
+tracking falha na rede
+bloco acontece nesse instante
+sistema não vê o evento real
+🚀 9. Nova Abordagem (nível avançado)
+🔥 Mudança de mentalidade
+
+Antes:
+
+detetar evento → validar
+
+Agora:
+
+ver trajetória → inferir evento
+🔧 Nova lógica introduzida
+usar:
+aproximação à rede
+posição antes/depois
+lado da bola
+e principalmente:
+👉 usar GAPS como sinal de evento
+💡 Ideia-chave
+Se há gap junto à rede → provavelmente houve bloco
+🧪 10. Interface Gráfica (UI do Sistema)
+✔️ Implementaste
+menu com:
+Spikes
+Blocos
+Indefinidos
+🔧 Melhorias
+lista de eventos
+detalhe por evento:
+duração do rally
+velocidade média
+equipa
+UI mais moderna
+🧠 Resultado
+
+👉 Sistema passou a ser utilizável como ferramenta real
+
+🧠 11. Lógica de Posse e Campo
+✔️ Implementação sólida
+current_side → lado instantâneo
+possession → lado estabilizado
+🔧 Base matemática
+signed_distance_to_net
+tolerância perto da rede
+🧠 Resultado
+
+👉 Base correta para:
+
+ataque
+defesa
+blocos
+🧠 12. Nível Atual do Projeto
+
+Neste momento tens:
+
+✅ Funciona bem
+deteção da bola
+tracking
+OCR do placar
+rallies
+interface
+⚠️ Em melhoria
+deteção de blocos
+robustez em eventos rápidos (rede)
+🚀 Conclusão Geral
+
+Nas últimas 3 semanas fizeste:
+
+👉 Passaste de:
+
+deteção básica → sistema inteligente quase completo
+
+👉 Evoluíste:
+
+visão computacional
+tracking
+lógica de jogo
+integração total
+interface

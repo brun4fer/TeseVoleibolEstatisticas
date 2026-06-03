@@ -1,0 +1,824 @@
+Análise de Datasets para Análise Automática de Desempenho em Voleibol
+Este documento apresenta uma análise dos principais datasets existentes e disponíveis para download, relevantes para o desenvolvimento de sistemas automáticos de análise de desempenho em jogos de voleibol e desportos indoor similares. A análise foca-se na natureza dos dados, tipo de anotações e aplicabilidade em tarefas de deteção, rastreamento e reconhecimento de ações.
+Datasets Analisados
+Volleyball Dataset (Deep Activity Recognition)
+Link: https://github.com/mostafa-saad/deep-activity-rec
+Descrição: Dataset clássico e amplamente utilizado na literatura para reconhecimento de ações em voleibol. Contém vídeos de jogos reais com anotações temporais de ações individuais e coletivas, tais como spike, set, block e pass.
+
+Relevância: Apesar de não incluir bounding boxes ou tracking detalhado, é fundamental para justificar a relevância científica do problema e contextualizar o estado da arte em voleibol.
+DeepSport Radar Dataset
+Link: https://datasetninja.com/deep-sport-radar#download
+Descrição: Dataset de basquetebol indoor com vídeos anotados para deteção e rastreamento de jogadores. Inclui bounding boxes e informação temporal, sendo amplamente utilizado em estudos de tracking multi-alvo.
+Relevância: Embora não seja específico de voleibol, apresenta condições indoor semelhantes, tornando-o adequado para transferência de metodologias.
+Ball Tracking Dataset (EPFL)
+Link: https://github.com/cvlab-epfl/balltracking
+Descrição: Dataset académico focado no rastreamento da bola em vídeos desportivos. Inclui anotações frame-a-frame da posição da bola.
+Relevância: O rastreamento da bola é um dos maiores desafios no voleibol, tornando este dataset particularmente relevante para a tese.
+SportsMOT Dataset
+Link: https://github.com/MCG-NJU/SportsMOT
+Descrição: Dataset moderno de tracking multi-objeto em vários desportos coletivos. Inclui bounding boxes e IDs para rastreamento, seguindo o formato MOT.
+Relevância: Representa o estado da arte em tracking desportivo e é frequentemente utilizado como benchmark académico.
+Tracking Volleyball Players (Roboflow)
+Link: https://universe.roboflow.com/david-paulinus-54fnl/tracking-volleyball-players
+Descrição: Dataset recente com imagens anotadas de jogadores de voleibol, disponibilizado em formato pronto para treino com modelos YOLO.
+Relevância: Dataset específico de voleibol, adequado para prototipagem e testes iniciais de deteção.
+Volleyball Object Tracking (Roboflow)
+Link: https://universe.roboflow.com/studioprojektowe/volleyball-object-tracking
+Descrição: Dataset de imagens de voleibol com anotações de jogadores e bola.
+Relevância: Embora de menor dimensão, demonstra tentativas recentes de criação de datasets específicos para voleibol.
+Síntese Crítica
+A análise realizada evidencia que, apesar da existência de alguns datasets específicos para voleibol, a maioria apresenta limitações significativas ao nível da deteção e rastreamento detalhado de jogadores e da bola. Em contraste, datasets provenientes de outros desportos indoor oferecem anotações mais completas e são frequentemente utilizados como referência na literatura. Esta lacuna justifica o desenvolvimento de soluções automáticas dedicadas ao voleibol, bem como a possível criação ou adaptação de um dataset alinhado com requisitos reais de análise de desempenho.
+
+1️⃣ Event Detection in Sports Videos Using Deep Learning
+Autores: A. M. Nadeem et al.
+Ano: 2022
+Link:
+https://www.mdpi.com/2076-3417/12/9/4429
+Resumo:
+Este artigo apresenta métodos baseados em deep learning para deteção automática de eventos em vídeos desportivos. Os autores exploram técnicas de visão computacional para identificar ações relevantes durante jogos, demonstrando que modelos de redes neuronais conseguem melhorar significativamente a análise automática de vídeo.
+
+2️⃣ Player and Ball Detection in Sports Video Using YOLOv7
+Autores: Muresan et al.
+Ano: 2023
+Link:
+https://arxiv.org/abs/2306.03434
+Resumo:
+Este trabalho propõe um sistema baseado em YOLOv7 para deteção simultânea de jogadores e da bola em vídeos desportivos. O modelo permite realizar deteção em tempo real e melhorar a análise tática em diferentes modalidades desportivas.
+
+3️⃣ Group Activity Recognition in Volleyball Videos
+Autores: Ibrahim et al.
+Ano: 2023
+Link:
+10.1109/ICIP51287.2024.10647499
+Resumo:
+Este artigo apresenta um método para reconhecimento de atividades coletivas em jogos de voleibol, analisando ações como ataques, passes e bloqueios. A abordagem utiliza redes profundas para interpretar padrões de movimento e interação entre jogadores.
+
+4️⃣ Volleyball Trajectory Estimation and Analysis Using Graph Convolution
+Autores: Liu et al.
+Ano: 2022
+Link:
+https://www.igi-global.com/article/an-effective-volleyball-trajectory-estimation-and-analysis-method-with-embedded-graph-convolution/317936
+Resumo:
+Este estudo apresenta um método para estimativa da trajetória da bola em jogos de voleibol, utilizando YOLO para deteção inicial e Graph Convolution Networks para análise do movimento. O objetivo é melhorar a análise tática de jogadas.
+
+5️⃣ Analysis of Volleyball Video Intelligent Description Technology Based on Deep Learning
+Autores: Wang et al.
+Ano: 2022
+Link:
+https://pmc.ncbi.nlm.nih.gov/articles/PMC8727099/
+Resumo:
+Este artigo propõe um sistema de descrição automática de vídeos de voleibol utilizando deep learning, permitindo identificar e interpretar ações durante o jogo. O método melhora a capacidade de gerar descrições semânticas a partir de vídeo.
+
+6️⃣ Volleyball Training Video Classification Using BiLSTM and Attention
+Autores: Li et al.
+Ano: 2024
+Link:
+https://www.sciencedirect.com/science/article/pii/S2405844024107669
+Resumo:
+Este trabalho utiliza redes BiLSTM com mecanismo de atenção para classificar automaticamente diferentes ações em vídeos de treino de voleibol. Os resultados mostram elevada precisão na identificação de movimentos técnicos.
+
+7️⃣ Volleyball Video Moving Target Tracking and Detection
+Autores: Zhang et al.
+Ano: 2022
+Link:
+https://onlinelibrary.wiley.com/doi/10.1155/2022/8948431
+Resumo:
+Este artigo apresenta um método de deteção e tracking de objetos em movimento em vídeos de voleibol, com foco na identificação da bola e dos jogadores. O sistema combina técnicas de visão computacional para melhorar a precisão da análise.
+
+8️⃣ Volleyball Game Analysis Using Computer Vision Algorithms
+Autores: Horvat et al.
+Ano: 2024
+Link:
+https://www.scores.si/assets/papers/2024/SCORES24_paper_21.pdf
+Resumo:
+Este estudo apresenta um sistema de análise automática de jogos de voleibol usando algoritmos de visão computacional, incluindo deteção da bola e análise da trajetória durante as jogadas.
+
+9️⃣ An Action Recognition Method for Volleyball Players Using Deep Learning
+Autores: Zhang et al.
+Ano: 2021
+Link:
+https://scispace.com/pdf/an-action-recognition-method-for-volleyball-players-using-4bwsmfeszd.pdf
+Resumo:
+Este trabalho propõe um método baseado em deep learning para reconhecimento de ações de jogadores de voleibol, incluindo ataques, passes e bloqueios, alcançando elevada precisão na classificação.
+
+🔟 DeepSportradar-v1: A Dataset for Sports Understanding
+Autores: Giancola et al.
+Ano: 2022
+Link:
+https://arxiv.org/abs/2208.08190
+Resumo:
+Este artigo apresenta o dataset DeepSportradar, desenvolvido para tarefas de visão computacional em desporto, incluindo deteção de objetos e reconhecimento de eventos em vídeo.
+
+1️⃣1️⃣ Indoor Activity Detection and Recognition for Sport Games Analysis
+Autores: Ibrahim et al.
+Ano: 2014
+Link:
+https://arxiv.org/abs/1404.6413
+Resumo:
+Este trabalho propõe métodos para deteção de atividades em desportos indoor, incluindo voleibol, utilizando técnicas de visão computacional para analisar padrões de movimento e interação entre jogadores.
+1️⃣2  Real-Time Object Detection with YOLOv3
+Autores: Joseph Redmon, Ali Farhadi
+Ano: 2018
+Link:
+https://arxiv.org/abs/1804.02767
+Resumo:
+Este trabalho apresenta o modelo YOLOv3 para deteção de objetos em tempo real. A arquitetura tornou-se uma referência na área de visão computacional e é amplamente utilizada em aplicações desportivas para deteção de jogadores e da bola.
+1️⃣3  OpenPose: Realtime Multi-Person Pose Estimation
+Autores: Cao et al.
+Ano: 2017
+Link:
+https://arxiv.org/abs/1812.08008
+Resumo:
+Este trabalho apresenta o OpenPose, um sistema de estimativa de pose humana em tempo real. A abordagem permite identificar posições corporais de vários jogadores simultaneamente, sendo amplamente utilizada na análise de movimentos desportivos.
+
+
+Segunda Quinzena
+
+1. Transição do Placar para a Deteção da Bola
+Após a conclusão do sistema de OCR para o placar, o foco mudou para o maior desafio técnico: a deteção estável da bola.
+
+O Problema: A bola é pequena, move-se a alta velocidade (motion blur) e o pavilhão "Nave Ilídio Ramos" apresenta distrações visuais, como luzes fortes e murais decorativos.
+
+2. Otimização do Tracker e Heurísticas
+Inicialmente, tentámos otimizar o modelo genérico YOLOv8s com lógica matemática:
+
+Escolha: Utilização de imgsz=1280.
+
+Porquê: Para manter píxeis suficientes de um objeto pequeno (bola) em frames de grande angular.
+
+Escolha: Implementação de Filtros de Kalman e predição por vetor de velocidade.
+
+Porquê: Para manter o rastreio da bola mesmo quando ela é "perdida" por um frame devido a oclusão ou reflexos.
+
+Escolha: Filtros de Área e Homografia.
+
+Porquê: Para eliminar falsos positivos (como cabeças de jogadores ou luzes) que aparecem fora dos limites do campo ou com dimensões irreais.
+
+3. Diagnóstico e Mudança para Fine-Tuning
+Apesar das heurísticas, o modelo genérico confundia elementos do mural da parede com a bola.
+
+Escolha: Criação de um dataset personalizado e treino de um modelo especializado (best.pt).
+
+Porquê: Um modelo genérico (COCO dataset) não conhece a textura específica da bola oficial de voleibol nem as condições de luz daquele pavilhão. O treino focado numa única classe ("ball") aumenta drasticamente a precisão.
+
+Escolha: Inclusão de Imagens de Background (fotos do mural sem bola).
+
+Porquê: Ensinar especificamente ao modelo que o mural não é a bola, reduzindo os erros de deteção estática.
+
+4. Ajustes de Hardware (GTX 1650)
+Durante o treino, encontrámos limitações de memória e erros de sistema (WinError 1455).
+
+Escolha: Redução do batch para 2, desativação do amp e configuração de workers=0.
+
+Porquê: Para evitar o estouro da VRAM da tua placa gráfica e contornar falhas na gestão de memória virtual do Windows durante o treino.
+
+5. Estado Atual e Resultados
+Dataset: Expandido de 5 para 43 imagens anotadas, cobrindo diversas situações de jogo.
+
+Performance: O treino final resultou num mAP50 de 0.995, indicando que, para o conjunto de dados atual, o modelo é extremamente preciso.
+
+Integração: O novo "cérebro" (best.pt) já está integrado no tracker.py, permitindo agora o início da validação real das estatísticas de Spikes e Blocks.
+
+
+Terceira Quinzena
+
+Resumo do desenvolvimento recente do sistema de análise automática de estatísticas de voleibol
+
+Nos últimos dias foi desenvolvido e refinado o sistema responsável por detetar automaticamente o resultado dos rallies e classificar eventos técnicos, como spike e block, a partir de vídeo. O sistema baseia-se na combinação de três componentes principais: deteção da bola, leitura automática do placar (OCR) e análise da trajetória da bola relativamente à rede e aos campos.
+
+Durante o desenvolvimento surgiram várias dificuldades, principalmente relacionadas com a leitura automática do placar, que obrigaram à criação de diferentes abordagens e mecanismos de robustez.
+
+Estrutura geral da lógica do sistema
+
+O sistema segue o seguinte fluxo geral:
+
+Calibração inicial do campo
+
+O utilizador seleciona:
+
+4 cantos do campo
+
+2 pontos da rede
+
+Estes pontos permitem calcular:
+
+limites dos dois campos
+
+posição da rede
+
+referência espacial para analisar a trajetória da bola.
+
+Identificação da região do placar
+
+Inicialmente o utilizador seleciona manualmente a zona do placar.
+
+Essa região é utilizada para realizar OCR dos números do resultado.
+
+Tracking da bola
+
+O sistema segue a posição da bola ao longo dos frames.
+
+Cada posição é armazenada numa gaveta (buffer) de frames da bola.
+
+Deteção do fim do rally
+
+O rally termina quando:
+
+o placar muda
+
+ou a trajetória indica final do ponto.
+
+Classificação da jogada
+
+Quando o placar muda, o sistema analisa a trajetória da bola armazenada na gaveta e classifica o tipo de ação técnica.
+
+Exemplo de output do sistema:
+
+[OCR-VALID] Mudança +1 confirmada: (0, 4, 0, 2) -> (0, 5, 0, 2)
+[STAS-VALID] Placar mudou. Frames na gaveta: 6. Contando rali e verificando estatística técnica...
+[FINAL] Origem: CampoB | Fim: CampoB | Rede: True | Cruzou: False | Vmax: 137.96 -> RESULTADO: BLOCK.
+[POSSE] Bola no CampoB | Fim da Seta: CampoB
+[SERVICE-RESET] Origem: OCR | Gaveta e estado reiniciados.
+Classificação de eventos técnicos (Spike e Block)
+
+A classificação das jogadas baseia-se principalmente em três fatores:
+
+1. Origem da bola
+
+O sistema identifica em que campo começou o ataque:
+
+Origem: CampoA ou CampoB
+2. Cruzamento da rede
+
+O sistema verifica se a bola cruzou a rede:
+
+Rede: True / False
+3. Campo onde a bola termina
+Fim: CampoA ou CampoB
+Lógica para identificar Block
+
+Um block é identificado quando:
+
+a bola parte de um campo
+
+atinge a rede ou é bloqueada
+
+e regressa ao mesmo campo sem cruzar para o adversário
+
+Exemplo:
+
+Origem: CampoB
+Fim: CampoB
+Rede: True
+Cruzou: False
+
+Resultado:
+
+BLOCK
+Lógica para identificar Spike
+
+Um spike é identificado quando:
+
+a bola parte de um campo
+
+cruza a rede
+
+termina no campo adversário
+
+Exemplo lógico:
+
+Origem: CampoA
+Fim: CampoB
+Rede: True
+Cruzou: True
+
+Resultado:
+
+SPIKE
+Identificação da posse de bola
+
+O sistema mantém também a posse de bola:
+
+[POSSE] Bola no CampoB
+
+Esta informação ajuda a interpretar corretamente quem iniciou o ataque e quem ganhou o ponto.
+
+Principais dificuldades encontradas
+
+A maior dificuldade encontrada durante o desenvolvimento foi a leitura correta do placar através de OCR.
+
+Apesar de os números serem relativamente simples (números brancos em fundo escuro), a leitura mostrou-se inconsistente devido a:
+
+compressão do vídeo
+
+variação de iluminação
+
+pequenas mudanças na posição da câmara
+
+resolução variável dos dígitos
+
+Abordagens testadas para melhorar o OCR
+
+Foram testadas várias estratégias para melhorar a leitura do placar.
+
+1. Template Matching
+
+Primeira abordagem:
+
+recorte dos dígitos
+
+comparação com imagens de referência
+
+Problemas encontrados:
+
+variação no tamanho dos dígitos
+
+baixa robustez a ruído
+
+Resultado: precisão insuficiente
+
+2. Normalização das imagens
+
+Tentou-se:
+
+redimensionamento
+
+threshold adaptativo
+
+inversão de cores
+
+Apesar de alguma melhoria, o OCR continuava a falhar frequentemente.
+
+3. CNN para reconhecimento de dígitos
+
+Foi criado um dataset de dígitos extraídos do vídeo e treinada uma pequena rede neuronal convolucional (CNN).
+
+O modelo apresentou boa precisão em teste isolado, mas no pipeline completo surgiram problemas:
+
+deteção incorreta da região do dígito
+
+cortes incompletos
+
+variação no posicionamento
+
+Resultado: melhoria limitada no sistema real.
+
+Problema principal observado
+
+O OCR frequentemente lia números incorretos, por exemplo:
+
+Placar real: 5-2
+OCR lê:      5-0
+
+Isto cria um problema porque:
+
+5-2 -> 5-0
+
+é uma mudança impossível no voleibol.
+
+No voleibol, o placar apenas pode mudar de:
+
+A-B -> A+1-B
+ou
+A-B -> A-B+1
+Lógica de validação do placar
+
+Para resolver este problema foi implementada uma lógica baseada nas regras do voleibol.
+
+O sistema verifica se a mudança é válida:
+
+5-2 -> 6-2
+ou
+5-2 -> 5-3
+
+Se não for válida, a leitura é considerada ruído OCR.
+
+Exemplo:
+
+[OCR-NOISE] Leitura inferior ignorada: oficial=(0, 5, 0, 2) OCR=(0, 4, 0, 2)
+Estratégia de confirmação da mudança de placar
+
+Para lidar com erros persistentes de OCR foi implementado um sistema de confirmação:
+
+O sistema tenta ler o placar várias vezes consecutivas.
+
+Se durante 5 leituras consecutivas o OCR indicar um valor diferente, assume-se que o placar mudou.
+
+Exemplo:
+
+Placar oficial: 5-2
+OCR lê: 5-0
+
+Após várias leituras iguais:
+
+5-0
+5-0
+5-0
+5-0
+5-0
+
+O sistema conclui que houve mudança e aplica a regra do voleibol:
+
+5-2 -> 5-3
+Correção temporária do OCR (digit locking)
+
+Depois de assumir a mudança, o sistema cria uma associação temporária:
+
+0 -> 3
+
+Ou seja:
+
+OCR_RAW: 5-0
+OCR_CORRIGIDO: 5-3
+
+Durante o rally, sempre que o OCR lê 0, o sistema interpreta como 3.
+
+Este mecanismo permanece ativo até que o placar mude novamente.
+
+Quando ocorre nova mudança válida, a associação é reiniciada.
+
+Resultado da estratégia
+
+Esta abordagem permitiu:
+
+evitar loops de incremento do placar
+
+manter a contagem correta dos pontos
+
+garantir que cada mudança de placar corresponde ao fim de um rally
+
+Além disso, permitiu ao sistema continuar a calcular corretamente as estatísticas técnicas, mesmo quando o OCR não conseguia ler corretamente os números.
+
+Conclusão
+
+Apesar das dificuldades associadas à leitura automática do placar, foi possível desenvolver uma lógica robusta baseada nas regras do voleibol e na análise temporal das leituras OCR.
+
+A combinação de:
+
+validação de mudanças possíveis
+
+confirmação por múltiplas leituras
+
+correção temporária de dígitos
+
+análise da trajetória da bola
+
+permitiu criar um sistema capaz de identificar automaticamente o fim de rallies e classificar eventos técnicos como spike e block a partir de vídeo.
+
+Quarta Quinzena
+
+partilhei github
+meti imagens na drive
+rename dataset
+digit templates com os números para ler placar
+leitura de placar
+carregamento de mais imagens para detetar a bola
+scoreboard_template - para ler placar
+test_ball_detection - para seguir a bola e calcular velocidade
+
+Quinta Quinzena
+
+📊 🧠 RESUMO DO QUE FOI FEITO HOJE
+🔧 1. Organização do dataset
+Tinhas imagens (frames) + labels (txt) separadas
+Criámos script para:
+copiar para dataset/images/train e dataset/labels/train
+evitar sobrescrever ficheiros
+manter sincronização imagem ↔ label
+
+👉 Resultado: dataset limpo e consistente
+
+🧪 2. Treino inicial do modelo YOLO
+Treinaste com:
+~500 imagens
+resolução alta (imgsz=1280)
+Observaste:
+melhoria rápida nas métricas
+modelo a aprender corretamente
+
+👉 Primeira validação: modelo funcional
+
+🚨 3. Identificação de problema crítico
+
+Descobrimos que:
+
+👉 estavas a validar no mesmo dataset de treino
+
+Ou seja:
+
+métricas inflacionadas
+avaliação não realista
+
+👉 Este foi um dos pontos mais importantes do dia
+
+🧠 4. Implementação de split inteligente
+
+Criaste divisão:
+
+train (80%)
+val (20%)
+
+Com:
+
+script inteligente (evitar frames semelhantes)
+sincronização imagem + label
+
+👉 Resultado: avaliação agora correta
+
+🔁 5. Novo treino com dataset correto
+Re-treinaste com train/val separados
+métricas agora mais fiáveis
+processo alinhado com boas práticas de ML
+🎯 6. Teste no mundo real (CRUCIAL)
+
+Testaste no test_ball_detection.py
+
+👉 Resultado:
+
+bola seguida muito melhor
+tracking muito mais estável
+melhoria clara no cenário real
+
+💥 Este é o maior indicador de sucesso
+
+🧠 7. Aprendizagens importantes
+
+Hoje consolidaste conceitos fundamentais:
+
+Machine Learning
+importância de train vs validation
+métricas podem enganar sem split
+ciclo: dataset → treino → teste
+Computer Vision
+small object detection é difícil
+dataset é tão importante como o modelo
+combinar:
+YOLO
+motion gating
+background subtraction
+Engenharia
+scripts para automação de dataset
+pipeline estruturado
+debugging baseado em comportamento real
+📈 Estado atual do projeto
+Antes de hoje:
+deteção inconsistente
+muitos falsos positivos
+modelo limitado
+Depois de hoje:
+modelo muito mais robusto
+tracking funcional
+pipeline correta
+base sólida para tese
+
+Sexta Quinzena
+
+🧠 Resumo das Últimas 3 Semanas – Sistema de Análise de Voleibol
+🎯 Objetivo Geral
+
+Desenvolver um sistema automático capaz de:
+
+detetar a bola em vídeo
+seguir a sua trajetória
+interpretar eventos de jogo
+extrair estatísticas (rallies, spikes, blocos, etc.)
+⚙️ 1. Melhoria da Deteção da Bola (Core do Sistema)
+✔️ Evolução
+Começaste com deteção frame a frame com YOLO
+Tinhas falsos positivos (parede, chão, etc.)
+A bola era mal seguida em certos momentos
+🔧 O que fizeste
+Adicionaste filtros temporais
+continuidade da trajetória
+rejeição de saltos irreais (MAX_SPEED)
+Implementaste tracking baseado em centros
+Criaste trajetória visual (trail)
+🧠 Resultado
+
+👉 Sistema passou de “deteção instável” → para tracking consistente da bola
+
+🎥 2. Treino do Modelo YOLO (Custom Dataset)
+✔️ Dataset
+~357 imagens anotadas manualmente (CVAT)
+Organização em:
+dataset/images/train
+dataset/labels/train
+🔧 O que fizeste
+Script para evitar overwrite de imagens
+Treino com YOLOv8 (Ultralytics)
+Criação de split:
+treino (~80%)
+validação (~20%)
+📊 Métricas
+mAP50 chegou ~0.88–0.89
+precisão e recall bons para objeto pequeno
+🧠 Resultado
+
+👉 Detetor passou a reconhecer muito melhor a bola (especialmente no ar)
+
+🧪 3. Filtros Avançados (Tracking Inteligente)
+🔧 Implementações
+Background subtraction (MOG2)
+usado como sinal auxiliar
+Foreground validation
+rejeitar deteções sem movimento
+Score combinado
+confiança YOLO + movimento + trajetória
+🧠 Resultado
+
+👉 Redução de falsos positivos (parede/chão)
+
+🔗 4. Integração no Sistema Principal (main.py)
+✔️ Antes
+tracking no test_ball_detection.py
+pipeline principal separado
+🔧 O que fizeste
+integraste tracking robusto no main.py
+corrigiste:
+atraso da bola (Kalman vs centro real)
+trajetória mal desenhada
+passaste a usar:
+centros aceites (não previstos)
+🧠 Resultado
+
+👉 Sistema principal passou a usar tracking correto da bola
+
+📊 5. Leitura do Placar (Scoreboard OCR)
+✔️ Problemas
+leituras erradas (ex: 3 → 8)
+ruído de texto por cima
+🔧 Soluções
+introduziste:
+validação temporal
+confirmação por múltiplos frames
+removeste dependência de leitura única
+criaste:
+raw_score
+confirmed_score
+🧠 Resultado
+
+👉 OCR ficou muito mais estável e confiável
+
+🧠 6. Lógica de Estatísticas (Rallies, Eventos)
+✔️ Já tinhas
+deteção de:
+rallies
+spikes
+alguns eventos básicos
+🔧 Melhorias
+integração com:
+tracking melhor
+OCR mais estável
+correção de:
+resets de rally
+dependência de frames isolados
+🧠 Resultado
+
+👉 Base sólida para estatísticas automáticas
+
+🧱 7. Problema Principal Atual – Deteção de BLOCO
+❌ Problema inicial
+sistema não identificava blocos
+dependência de:
+attack_pattern
+erro:
+Atacante=None
+no_attack_pattern
+🔍 Diagnóstico feito
+
+Descobriste que:
+
+👉 o sistema falhava porque:
+
+não detetava ataque
+então nem tentava bloco
+🔧 Melhorias implementadas
+removeste dependência rígida de ataque
+introduziste:
+fallback de atacante
+lógica baseada em trajetória
+usaste:
+dist_to_net
+signed_distance_to_net
+approach_gain
+❗ Problema atual (descoberta importante)
+
+Com logs reais viste:
+
+APPROACH=False
+NET_CONTACT=False
+REVERSAL=False
+💥 8. GRANDE DESCOBERTA (CRÍTICA)
+
+👉 O sistema perde a bola no momento do bloco
+
+Exemplo:
+
+[INFILL] Gap de 7 frames junto a rede
+🧠 Interpretação
+tracking falha na rede
+bloco acontece nesse instante
+sistema não vê o evento real
+🚀 9. Nova Abordagem (nível avançado)
+🔥 Mudança de mentalidade
+
+Antes:
+
+detetar evento → validar
+
+Agora:
+
+ver trajetória → inferir evento
+🔧 Nova lógica introduzida
+usar:
+aproximação à rede
+posição antes/depois
+lado da bola
+e principalmente:
+👉 usar GAPS como sinal de evento
+💡 Ideia-chave
+Se há gap junto à rede → provavelmente houve bloco
+🧪 10. Interface Gráfica (UI do Sistema)
+✔️ Implementaste
+menu com:
+Spikes
+Blocos
+Indefinidos
+🔧 Melhorias
+lista de eventos
+detalhe por evento:
+duração do rally
+velocidade média
+equipa
+UI mais moderna
+🧠 Resultado
+
+👉 Sistema passou a ser utilizável como ferramenta real
+
+🧠 11. Lógica de Posse e Campo
+✔️ Implementação sólida
+current_side → lado instantâneo
+possession → lado estabilizado
+🔧 Base matemática
+signed_distance_to_net
+tolerância perto da rede
+🧠 Resultado
+
+👉 Base correta para:
+
+ataque
+defesa
+blocos
+🧠 12. Nível Atual do Projeto
+
+Neste momento tens:
+
+✅ Funciona bem
+deteção da bola
+tracking
+OCR do placar
+rallies
+interface
+⚠️ Em melhoria
+deteção de blocos
+robustez em eventos rápidos (rede)
+🚀 Conclusão Geral
+
+Nas últimas 3 semanas fizeste:
+
+👉 Passaste de:
+
+deteção básica → sistema inteligente quase completo
+
+👉 Evoluíste:
+
+visão computacional
+tracking
+lógica de jogo
+integração total
+interface
+
+Comparação(não esta na ordem, fiz isto na terceira quinzena):
+ YOLOv8 tende a ser melhor em velocidade e custo computacional (mais fácil para longos vídeos e quase tempo real).
+Detectron2 (Faster R-CNN) tende a ser mais “cuidadoso” por frame, mas normalmente é mais lento.
+Para a tua tese, o mais importante não é só “detetar bola”, mas manter trajetória estável para calcular spike/block sem erros.
+Então a comparação certa é:
+qualidade da deteção,
+estabilidade da trajetória,
+tempo de processamento,
+impacto nas estatísticas finais.
+
+
+Com ambos os modelos treinados especificamente para voleibol, a diferença principal esperada é o compromisso precisão vs velocidade: YOLOv8 oferece maior eficiência operacional, enquanto Faster R-CNN pode ser competitivo em precisão por frame, mas com maior custo de processamento.
+
+
+
+“Implementei uma pipeline alternativa com Detectron2, totalmente separada da pipeline YOLOv8 existente, para comparação metodológica.”
+“Testei no mesmo segmento de vídeo da tese (00:29:02–00:46:17) e gerei vídeo anotado + CSV de coordenadas.”
+“Na configuração atual (modelo COCO genérico), o Detectron2 confundiu elementos visuais do fundo com a bola real.”
+“Isso compromete a trajetória da bola e, por consequência, compromete estatísticas derivadas como spike e block.”
+“Conclusão prática: nesta fase, o YOLOv8 é a solução recomendada para o sistema principal, por ser mais fiável no cenário real do jogo.”
+“O Detectron2 continua válido como experimento de comparação; com treino específico para voleibol, pode melhorar, mas isso fica como trabalho futuro/fora do escopo atual.”
+Frase final forte para fechar:
+
+“A comparação mostrou que, para uso operacional na tese agora, robustez da trajetória é mais importante que trocar de arquitetura.”

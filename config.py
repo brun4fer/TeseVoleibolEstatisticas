@@ -13,13 +13,14 @@ def _time_to_seconds(ts: str) -> float:
 class Config:
     # Paths
     videos_dir: Path = Path(r"C:\Users\Utilizador\Desktop\Mestrado\Tese\VideosJogos")
-    video_file: str = "VideoAcademica.mp4"
+    #video_file: str = "VideoAcademica.mp4"
+    video_file: str = "video-2026-02-24T15-06-27.171Z.mp4"
     output_dir: Path = Path("outputs")
     calibration_dir: Path = Path("calibration")
     event_preview_dir: Path = Path("outputs/event_previews")
     event_store_file: Path = Path("outputs/volleyball_events.json")
 
-    # Time window (absolute timestamps in the video)
+    # Time window (absolute timestamps in the video) Academica
     # Inicio 
     # start_ts: str = "00:26:30"
     # 3-0 
@@ -28,9 +29,15 @@ class Config:
     #start_ts: str = "00:29:55"
     # start_ts: str = "00:34:25"
     # 10 - 5
-    start_ts: str = "00:46:17"
+    #start_ts: str = "00:46:17"
     #start_ts: str = "00:31:42"
-    end_ts: str = "00:47:17"
+    #end_ts: str = "00:47:17"
+
+    # Time window (absolute timestamps in the video) Leixoes
+    # Inicio 
+    #start_ts: str = "00:26:00"
+    start_ts: str = "00:36:00"
+    end_ts: str = "00:46:27"
 
     # Models
     yolo_model: str = "yolov8s.pt"  # modelo small para melhor detecção de bola

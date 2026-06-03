@@ -1,0 +1,92 @@
+📊 🧠 RESUMO DO QUE FOI FEITO HOJE
+🔧 1. Organização do dataset
+Tinhas imagens (frames) + labels (txt) separadas
+Criámos script para:
+copiar para dataset/images/train e dataset/labels/train
+evitar sobrescrever ficheiros
+manter sincronização imagem ↔ label
+
+👉 Resultado: dataset limpo e consistente
+
+🧪 2. Treino inicial do modelo YOLO
+Treinaste com:
+~500 imagens
+resolução alta (imgsz=1280)
+Observaste:
+melhoria rápida nas métricas
+modelo a aprender corretamente
+
+👉 Primeira validação: modelo funcional
+
+🚨 3. Identificação de problema crítico
+
+Descobrimos que:
+
+👉 estavas a validar no mesmo dataset de treino
+
+Ou seja:
+
+métricas inflacionadas
+avaliação não realista
+
+👉 Este foi um dos pontos mais importantes do dia
+
+🧠 4. Implementação de split inteligente
+
+Criaste divisão:
+
+train (80%)
+val (20%)
+
+Com:
+
+script inteligente (evitar frames semelhantes)
+sincronização imagem + label
+
+👉 Resultado: avaliação agora correta
+
+🔁 5. Novo treino com dataset correto
+Re-treinaste com train/val separados
+métricas agora mais fiáveis
+processo alinhado com boas práticas de ML
+🎯 6. Teste no mundo real (CRUCIAL)
+
+Testaste no test_ball_detection.py
+
+👉 Resultado:
+
+bola seguida muito melhor
+tracking muito mais estável
+melhoria clara no cenário real
+
+💥 Este é o maior indicador de sucesso
+
+🧠 7. Aprendizagens importantes
+
+Hoje consolidaste conceitos fundamentais:
+
+Machine Learning
+importância de train vs validation
+métricas podem enganar sem split
+ciclo: dataset → treino → teste
+Computer Vision
+small object detection é difícil
+dataset é tão importante como o modelo
+combinar:
+YOLO
+motion gating
+background subtraction
+Engenharia
+scripts para automação de dataset
+pipeline estruturado
+debugging baseado em comportamento real
+📈 Estado atual do projeto
+Antes de hoje:
+deteção inconsistente
+muitos falsos positivos
+modelo limitado
+Depois de hoje:
+modelo muito mais robusto
+tracking funcional
+pipeline correta
+base sólida para tese

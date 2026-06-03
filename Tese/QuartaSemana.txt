@@ -1,0 +1,8 @@
+partilhei github
+meti imagens na drive
+rename dataset
+digit templates com os números para ler placar
+leitura de placar
+carregamento de mais imagens para detetar a bola
+scoreboard_template - para ler placar
+test_ball_detection - para seguir a bola e calcular velocidade

@@ -1,0 +1,23 @@
+YOLOv8 tende a ser melhor em velocidade e custo computacional (mais fácil para longos vídeos e quase tempo real).
+Detectron2 (Faster R-CNN) tende a ser mais “cuidadoso” por frame, mas normalmente é mais lento.
+Para a tua tese, o mais importante não é só “detetar bola”, mas manter trajetória estável para calcular spike/block sem erros.
+Então a comparação certa é:
+qualidade da deteção,
+estabilidade da trajetória,
+tempo de processamento,
+impacto nas estatísticas finais.
+
+
+Com ambos os modelos treinados especificamente para voleibol, a diferença principal esperada é o compromisso precisão vs velocidade: YOLOv8 oferece maior eficiência operacional, enquanto Faster R-CNN pode ser competitivo em precisão por frame, mas com maior custo de processamento.
+
+
+
+“Implementei uma pipeline alternativa com Detectron2, totalmente separada da pipeline YOLOv8 existente, para comparação metodológica.”
+“Testei no mesmo segmento de vídeo da tese (00:29:02–00:46:17) e gerei vídeo anotado + CSV de coordenadas.”
+“Na configuração atual (modelo COCO genérico), o Detectron2 confundiu elementos visuais do fundo com a bola real.”
+“Isso compromete a trajetória da bola e, por consequência, compromete estatísticas derivadas como spike e block.”
+“Conclusão prática: nesta fase, o YOLOv8 é a solução recomendada para o sistema principal, por ser mais fiável no cenário real do jogo.”
+“O Detectron2 continua válido como experimento de comparação; com treino específico para voleibol, pode melhorar, mas isso fica como trabalho futuro/fora do escopo atual.”
+Frase final forte para fechar:
+
+“A comparação mostrou que, para uso operacional na tese agora, robustez da trajetória é mais importante que trocar de arquitetura.”
